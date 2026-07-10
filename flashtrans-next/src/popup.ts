@@ -180,6 +180,10 @@ async function f1GotText(text: string, title = "划词翻译", ocr = false) {
   // ── OCR 原文纠错：有 LLM 后端（qwen/API）时先用上下文修正识别错字，
   //    让展示与「复制原文」都干净；纠正后翻译不必再走 in-prompt 纠错。 ──
   let transOcr = doOcr;
+  if (doOcr && !ocrCorrectAvailable(settings)) {
+    // 明示纠错被跳过的原因，避免“开了开关却没反应”的困惑
+    $("tag").textContent = `${title} · 纠错需 GGUF/API 引擎`;
+  }
   if (doOcr && ocrCorrectAvailable(settings)) {
     dst.textContent = "正在校正原文…";
     fitHeight();
@@ -190,9 +194,11 @@ async function f1GotText(text: string, title = "划词翻译", ocr = false) {
         f1Source = cleaned;
         $("f1-src").textContent = cleaned;
         transOcr = false;
+        $("tag").textContent = `${title} · 已纠错`;
       }
     } catch {
-      /* 纠错失败：退回原始文本继续翻译，不阻塞 */
+      // 纠错失败：退回原始文本继续翻译，不阻塞，但在标题上说明
+      $("tag").textContent = `${title} · 纠错失败`;
     }
     dst.textContent = "";
     fitHeight();

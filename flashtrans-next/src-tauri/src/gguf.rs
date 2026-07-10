@@ -258,18 +258,28 @@ pub fn translate(
 
 /// OCR 原文纠错：用上下文修正识别错字/拆字/漏字、去掉字间多余空格，输出同语言的纠正文本
 /// （不翻译）。让"复制原文"也干净。
+/// 小模型（1.7B 级）对纯指令会原样照抄，必须用 few-shot 示例对话演示"修复"这个动作。
 pub fn correct_ocr(model_path: &str, text: &str) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(String::new());
     }
-    let system = "You are an OCR post-corrector. The user's text was extracted from a screenshot \
-         and may contain recognition errors: wrong or split characters, missing characters, and \
-         spurious spaces between characters. Fix obvious errors using context and remove the \
-         spurious spaces. Keep the SAME language — do NOT translate. Preserve line breaks. \
-         Output ONLY the corrected text, nothing else.";
-    let prompt = chatml(system, text, true); // 关闭思考，直接出结果
-    run(model_path, &prompt, 640, 0.1)
+    let system = "你是 OCR 文本修复助手。用户发来屏幕截图的 OCR 识别结果，其中可能有：\
+        被拆成偏旁的汉字、形近错字、字间多余空格、漏字。\
+        结合上下文修复为通顺原文：只改错处，不改写、不翻译、不解释，保留换行，直接输出修复后的全文。";
+    let ex_in = "并氵殳有变化，还是司间识别出的，最关键的是修这个伺题！亻尔看这个卉曲、这个川页序对不对。";
+    let ex_out = "并没有变化，还是瞬间识别出的，最关键的是修这个问题！你看这个三步曲、这个顺序对不对。";
+    // 实测备忘（qwen3-1.7b-q4）：思考模式 20s 且质量更差；无思考 + few-shot ~5s、
+    // 仅小幅修复。1.7B 是纠错能力下限，好效果需 API 或 4B+ 模型。
+    let no_think = "<think>\n\n</think>\n\n";
+    let prompt = format!(
+        "<|im_start|>system\n{system}<|im_end|>\n\
+         <|im_start|>user\n{ex_in}<|im_end|>\n\
+         <|im_start|>assistant\n{no_think}{ex_out}<|im_end|>\n\
+         <|im_start|>user\n{text}<|im_end|>\n\
+         <|im_start|>assistant\n{no_think}"
+    );
+    run(model_path, &prompt, 768, 0.1)
 }
 
 /// 本地 GGUF 对话（F4），可带划词/截图上下文

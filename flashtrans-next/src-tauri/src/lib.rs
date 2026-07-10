@@ -420,13 +420,15 @@ mod ocr {
         }
     }
 
-    /// 把应用的源语言代码映射成优先尝试的 OCR BCP-47 语言标签
+    /// 把应用的源语言代码映射成优先尝试的 OCR BCP-47 语言标签。
+    /// 注意 en 也优先中文引擎：中文引擎能同时识别中英混排，而英文引擎看到中文
+    /// 会输出乱码（实测灾难级）；源语言设 en 的中文用户截中文图是常态，不能炸。
     fn lang_prefs(source_lang: &str) -> Vec<&'static str> {
         match source_lang.trim() {
             "" | "auto" => vec!["zh-Hans", "en"],
             "zh" => vec!["zh-Hans", "en"],
             "zh-Hant" => vec!["zh-Hant", "zh-Hans"],
-            "en" => vec!["en"],
+            "en" => vec!["zh-Hans", "en"],
             "ja" => vec!["ja"],
             "ko" => vec!["ko"],
             "fr" => vec!["fr"],
@@ -756,27 +758,43 @@ mod ocr_ab_tests {
             .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false))
             .collect();
         paths.sort();
+        let lang = std::env::var("FT_OCR_LANG").unwrap_or_else(|_| "auto".into());
         let old = ocr::PreprocOpts {
             stretch: false,
             short_scale: false,
             max_factor: 6.0,
             ..Default::default()
         };
-        let variants: [(&str, ocr::PreprocOpts); 2] = [
-            ("old(max6)", old),
-            ("default  ", ocr::PreprocOpts::default()),
+        let variants: [(&str, ocr::PreprocOpts); 3] = [
+            ("pre-today(max6)   ", old),
+            ("morning(str+short)", ocr::PreprocOpts { stretch: true, short_scale: true, max_factor: 6.0, ..old }),
+            ("current(max2)     ", ocr::PreprocOpts::default()),
         ];
         for p in paths {
             let img = image::open(&p).expect("open png").to_rgba8();
             let (w, h) = img.dimensions();
             let raw = img.into_raw();
-            println!("── {} ({w}x{h})", p.file_name().unwrap().to_string_lossy());
+            println!("── {} ({w}x{h}) lang={lang}", p.file_name().unwrap().to_string_lossy());
             for (label, opts) in variants {
-                let out = ocr::recognize_with(w, h, &raw, "auto", opts)
+                let out = ocr::recognize_with(w, h, &raw, &lang, opts)
                     .unwrap_or_else(|e| format!("<err: {e}>"));
                 println!("  [{label}] {}", out.replace('\n', " ⏎ "));
             }
         }
+    }
+
+    /// GGUF 纠错冒烟测试：FT_QWEN_MODEL 指向 .gguf 时运行，验证纠错可用并计时
+    #[test]
+    fn qwen_correct_smoke() {
+        let model = match std::env::var("FT_QWEN_MODEL") {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let garbled = "可以的话在一台氵殳有 Python 环境的电脑（或斤建 Windows 用户）再验一逞 CT2，那是最严恪的开箱即用验证";
+        let t0 = std::time::Instant::now();
+        let out = crate::gguf::correct_ocr(&model, garbled).expect("correct_ocr failed");
+        println!("correct_ocr took {:?}\n  in : {garbled}\n  out: {out}", t0.elapsed());
+        assert!(!out.trim().is_empty());
     }
 }
 
