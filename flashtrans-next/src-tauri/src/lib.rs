@@ -581,16 +581,64 @@ mod ocr {
         out
     }
 
+    /// 预处理开关（供 A/B 测试与调优；生产走 Default）
+    #[derive(Clone, Copy)]
+    pub struct PreprocOpts {
+        pub stretch: bool,     // 低对比截图做对比度拉伸
+        pub short_scale: bool, // 放大倍率额外考虑短边（宽而矮的整行截图）
+        pub invert_dark: bool, // 深色底反相为浅底深字
+        pub sharpen: bool,     // 放大后 unsharpen 锐化
+        pub gray: bool,        // 灰度化（去 ClearType 彩色亚像素边缘）
+        pub catmull: bool,     // 用 CatmullRom 插值（否则 Lanczos3，振铃更强）
+        pub max_factor: f32,   // 放大倍率上限
+    }
+
+    impl Default for PreprocOpts {
+        fn default() -> Self {
+            Self {
+                // A/B 实测（19 张 GDI 渲染样张）：拉伸会破坏抗锯齿渐变，低对比场景反而更差
+                stretch: false,
+                short_scale: true,
+                invert_dark: true,
+                sharpen: true,
+                gray: false,
+                catmull: false,
+                // A/B 实测：小字放大超过 ~2x 会被插值撕碎成偏旁（“三步曲”→“卉曲”），
+                // 2x 恰好把常见 14px 字推进 Windows OCR 的甜点区（~28px）
+                max_factor: 2.0,
+            }
+        }
+    }
+
     /// 识别一张 RGBA8 图（每像素 R,G,B,A），返回按行拼接的文本
     pub fn recognize_rgba(width: u32, height: u32, rgba: &[u8], source_lang: &str) -> Result<String, String> {
+        recognize_with(width, height, rgba, source_lang, PreprocOpts::default())
+    }
+
+    pub fn recognize_with(
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        source_lang: &str,
+        opts: PreprocOpts,
+    ) -> Result<String, String> {
         if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
             return Err("截图数据无效".into());
         }
         init_mta();
 
         let mut base = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or("截图数据无效")?;
+        // 灰度化：中和 ClearType 彩色亚像素边缘（后续反相/放大都在灰度上进行更稳）
+        if opts.gray {
+            for px in base.pixels_mut() {
+                let y = (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) as u8;
+                px[0] = y;
+                px[1] = y;
+                px[2] = y;
+            }
+        }
         // 深色模式（浅字深底）是 Windows OCR 命中率杀手：暗底整体反相为“深字浅底”再识别
-        if dark_background(&base) {
+        if opts.invert_dark && dark_background(&base) {
             for px in base.pixels_mut() {
                 px[0] = 255 - px[0];
                 px[1] = 255 - px[1];
@@ -598,24 +646,35 @@ mod ocr {
             }
         }
         // 低对比截图先拉伸对比度，再考虑放大
-        stretch_contrast(&mut base);
+        if opts.stretch {
+            stretch_contrast(&mut base);
+        }
 
         // 小图 / 小字放大后 Windows OCR 明显更准。除长边外还看短边：
         // 宽而矮的整行截图（如 2200×60）文字同样小，此前不放大是漏字来源之一
         let long = width.max(height) as f32;
         let short = width.min(height) as f32;
         let f_long = if long < 2000.0 { 2000.0 / long } else { 1.0 };
-        let f_short = if short < 200.0 { 200.0 / short } else { 1.0 };
-        let mut factor = f_long.max(f_short).min(6.0);
+        let f_short = if opts.short_scale && short < 200.0 { 200.0 / short } else { 1.0 };
+        let mut factor = f_long.max(f_short).min(opts.max_factor);
         if long * factor > 9000.0 {
             factor = 9000.0 / long; // Windows OCR 位图上限 10000px，留白前先封顶
         }
         let up = if factor > 1.01 {
             let nw = (((width as f32) * factor).round() as u32).max(1);
             let nh = (((height as f32) * factor).round() as u32).max(1);
-            let scaled = image::imageops::resize(&base, nw, nh, image::imageops::FilterType::Lanczos3);
-            // 放大后轻度锐化，让文字边缘更清晰，识别更稳
-            image::imageops::unsharpen(&scaled, 1.2, 2)
+            let filter = if opts.catmull {
+                image::imageops::FilterType::CatmullRom
+            } else {
+                image::imageops::FilterType::Lanczos3
+            };
+            let scaled = image::imageops::resize(&base, nw, nh, filter);
+            if opts.sharpen {
+                // 放大后轻度锐化，让文字边缘更清晰，识别更稳
+                image::imageops::unsharpen(&scaled, 1.2, 2)
+            } else {
+                scaled
+            }
         } else {
             base
         };
@@ -675,6 +734,49 @@ mod ocr {
             }
         }
         Ok(out.join("\n"))
+    }
+}
+
+/// OCR 预处理 A/B 对比：FT_OCR_TEST_DIR 指向 PNG 目录时逐图跑 4 种预处理组合。
+/// 运行：FT_OCR_TEST_DIR=... cargo test ocr_ab -- --nocapture
+#[cfg(all(test, windows))]
+mod ocr_ab_tests {
+    use super::ocr;
+
+    #[test]
+    fn ocr_ab_matrix() {
+        let dir = match std::env::var("FT_OCR_TEST_DIR") {
+            Ok(d) => d,
+            Err(_) => return, // 未设置则静默跳过（普通 cargo test 不受影响）
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read test dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("png")).unwrap_or(false))
+            .collect();
+        paths.sort();
+        let old = ocr::PreprocOpts {
+            stretch: false,
+            short_scale: false,
+            max_factor: 6.0,
+            ..Default::default()
+        };
+        let variants: [(&str, ocr::PreprocOpts); 2] = [
+            ("old(max6)", old),
+            ("default  ", ocr::PreprocOpts::default()),
+        ];
+        for p in paths {
+            let img = image::open(&p).expect("open png").to_rgba8();
+            let (w, h) = img.dimensions();
+            let raw = img.into_raw();
+            println!("── {} ({w}x{h})", p.file_name().unwrap().to_string_lossy());
+            for (label, opts) in variants {
+                let out = ocr::recognize_with(w, h, &raw, "auto", opts)
+                    .unwrap_or_else(|e| format!("<err: {e}>"));
+                println!("  [{label}] {}", out.replace('\n', " ⏎ "));
+            }
+        }
     }
 }
 
