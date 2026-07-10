@@ -15,33 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-_CHAT_QSS = """
-QWidget {
-    background: #14161a;
-    color: #e7eaf0;
-    font-family: "Microsoft YaHei UI";
-    font-size: 12px;
-}
-QPlainTextEdit {
-    background: #0f1114;
-    border: 1px solid #2a2f37;
-    border-radius: 10px;
-    padding: 10px;
-    selection-background-color: #2b6cb0;
-}
-QPushButton {
-    background: #1e2228;
-    border: 1px solid #2a2f37;
-    border-radius: 8px;
-    padding: 7px 12px;
-}
-QPushButton:hover { background: #242a33; }
-QPushButton:pressed { background: #1a1f26; }
-QLabel#SectionTitle {
-    color: #c7cdd8;
-    font-weight: 600;
-}
-"""
+from main_window import _build_qss
 
 
 class ChatWindow(QDialog):
@@ -53,10 +27,10 @@ class ChatWindow(QDialog):
         self.setWindowTitle("FlashTrans - F4 对话")
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.resize(720, 520)
-        self.setStyleSheet(_CHAT_QSS)
+        self.apply_theme("dark", 12)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
         self._think_btn = QPushButton("显示思考过程", self)
@@ -87,6 +61,7 @@ class ChatWindow(QDialog):
         self._btn_save = QPushButton("保存记录", row)
         self._btn_clear = QPushButton("清除记录", row)
         self._btn_send = QPushButton("发送", row)
+        self._btn_send.setObjectName("TranslateBtn")
         self._btn_close = QPushButton("关闭", row)
         row_layout.addStretch(1)
         row_layout.addWidget(self._btn_save)
@@ -100,6 +75,9 @@ class ChatWindow(QDialog):
         self._btn_send.clicked.connect(self._send)
         self._btn_close.clicked.connect(self.close)
         self._think_btn.toggled.connect(self._toggle_think)
+
+    def apply_theme(self, theme: str, font_size: int = 12) -> None:
+        self.setStyleSheet(_build_qss(theme, font_size))
 
     def set_input_text(self, text: str) -> None:
         text = str(text or "")

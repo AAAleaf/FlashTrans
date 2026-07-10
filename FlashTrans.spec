@@ -39,7 +39,11 @@ if models_dir.exists():
     if readme.exists() and readme.is_file():
         datas.append((str(readme), "models"))
     if flavor == "nllb":
-        roots = [models_dir / "nllb-200-1.3b-int8"]
+        # Include 3.3B if present, otherwise 1.3B
+        nllb_3b = models_dir / "nllb-200-3.3b-int8"
+        nllb_1b = models_dir / "nllb-200-1.3b-int8"
+        nllb_root = nllb_3b if nllb_3b.exists() and (nllb_3b / "model.bin").exists() else nllb_1b
+        roots = [nllb_root]
         for root in roots:
             if root.exists():
                 for p in root.rglob("*"):

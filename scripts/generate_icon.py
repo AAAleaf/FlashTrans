@@ -42,6 +42,7 @@ def _from_logo(path: Path, size: int, remove_light_bg: bool) -> "Image.Image":
     img = Image.open(path).convert("RGBA")
     if remove_light_bg:
         img = _remove_light_background(img)
+    img = _crop_to_alpha(img, pad=max(1, size // 24))
     
     w, h = img.size
     if w <= 0 or h <= 0:
@@ -60,6 +61,22 @@ def _from_logo(path: Path, size: int, remove_light_bg: bool) -> "Image.Image":
     y = (size - nh) // 2
     canvas.alpha_composite(img, (x, y))
     return canvas
+
+
+def _crop_to_alpha(img: "Image.Image", pad: int) -> "Image.Image":
+    img = img.convert("RGBA")
+    a = img.split()[-1]
+    bbox = a.getbbox()
+    if bbox is None:
+        return img
+    x0, y0, x1, y1 = bbox
+    x0 = max(0, x0 - int(pad))
+    y0 = max(0, y0 - int(pad))
+    x1 = min(img.size[0], x1 + int(pad))
+    y1 = min(img.size[1], y1 + int(pad))
+    if x1 <= x0 or y1 <= y0:
+        return img
+    return img.crop((x0, y0, x1, y1))
 
 
 def _remove_light_background(img: "Image.Image") -> "Image.Image":
@@ -128,11 +145,15 @@ def main() -> int:
     out_path = Path(args.out).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logo_path = (out_path.parent / "logo.png").resolve()
-    if not logo_path.exists():
-        raise FileNotFoundError(f"Logo not found: {logo_path}")
+    logo_candidates = [
+        (out_path.parent / "new_logo.png").resolve(),
+        (out_path.parent / "logo.png").resolve(),
+    ]
+    logo_path = next((p for p in logo_candidates if p.exists()), None)
+    if logo_path is None:
+        raise FileNotFoundError("Logo not found: new_logo.png / logo.png")
     use_logo = True
-    remove_light_bg = False
+    remove_light_bg = True
 
     sizes = [16, 20, 24, 32, 48, 64, 128, 256]
     images = [(_from_logo(logo_path, s, remove_light_bg) if use_logo else _draw_icon(s)) for s in sizes]

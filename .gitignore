@@ -34,6 +34,12 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Claude Code 本地 agent 配置 / 工作树（含 settings.local.json、临时 worktree）
+.claude/
+
+# 内部交接/开发笔记（含本机绝对路径，勿公开）
+design/HANDOFF.md
+
 models/
 .cache/
 .tmp/

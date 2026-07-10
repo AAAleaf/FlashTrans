@@ -137,6 +137,52 @@ class SettingsStore:
             backend = "offline"
         self._qs.setValue("translation_backend", backend)
 
+    def get_theme(self) -> str:
+        valid = (
+            "dark", "light", "eye_care", "gray", "gray_blue", "nature",
+            "rose", "ocean", "purple", "amber", "mint", "slate",
+        )
+        v = str(self._qs.value("theme", "dark") or "dark").strip().lower()
+        return v if v in valid else "dark"
+
+    def set_theme(self, theme: str) -> None:
+        valid = (
+            "dark", "light", "eye_care", "gray", "gray_blue", "nature",
+            "rose", "ocean", "purple", "amber", "mint", "slate",
+        )
+        self._qs.setValue("theme", theme if theme in valid else "dark")
+
+    def get_popup_autoclose_secs(self) -> int:
+        """结果弹窗自动关闭秒数；0 = 不自动关闭（手动关闭）。"""
+        try:
+            v = int(self._qs.value("popup_autoclose_secs", 8))
+        except Exception:
+            v = 8
+        return max(0, min(300, v))
+
+    def set_popup_autoclose_secs(self, secs: int) -> None:
+        try:
+            secs = int(secs)
+        except Exception:
+            secs = 8
+        self._qs.setValue("popup_autoclose_secs", max(0, min(300, secs)))
+
+    def get_font_size(self) -> int:
+        try:
+            return max(10, min(24, int(self._qs.value("font_size", 12) or 12)))
+        except Exception:
+            return 12
+
+    def set_font_size(self, size: int) -> None:
+        self._qs.setValue("font_size", max(10, min(24, int(size or 12))))
+
+    def get_source_language(self) -> str:
+        v = str(self._qs.value("source_language", "auto") or "auto").lower().strip()
+        return v or "auto"
+
+    def set_source_language(self, lang: str) -> None:
+        self._qs.setValue("source_language", str(lang or "").lower().strip() or "auto")
+
     def get_hotkeys(self) -> dict[str, dict[str, int]]:
         defaults: dict[str, dict[str, int]] = {
             "f1": {"vk": 0x70, "mods": 0},

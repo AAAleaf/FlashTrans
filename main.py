@@ -21,6 +21,68 @@ from settings_store import SettingsStore
 from snipping_tool import SnippingOverlay
 from ui_popups import FloatingPopup, ScreenshotResultOverlay
 
+# NLLB language code map (short → NLLB BCP-47 format)
+# NLLB-200 supports 200 languages; most commonly used ones listed here
+_NLLB_LANG_MAP: dict[str, str] = {
+    # East Asian
+    "zh":      "zho_Hans",   # Chinese Simplified
+    "zh_hant": "zho_Hant",   # Chinese Traditional
+    "ja":      "jpn_Jpan",   # Japanese
+    "ko":      "kor_Hang",   # Korean
+    # European (West)
+    "en":      "eng_Latn",   # English
+    "fr":      "fra_Latn",   # French
+    "de":      "deu_Latn",   # German
+    "es":      "spa_Latn",   # Spanish
+    "it":      "ita_Latn",   # Italian
+    "pt":      "por_Latn",   # Portuguese
+    "nl":      "nld_Latn",   # Dutch
+    "sv":      "swe_Latn",   # Swedish
+    "ca":      "cat_Latn",   # Catalan
+    # European (East / Cyrillic)
+    "ru":      "rus_Cyrl",   # Russian
+    "uk":      "ukr_Cyrl",   # Ukrainian
+    "pl":      "pol_Latn",   # Polish
+    "cs":      "ces_Latn",   # Czech
+    "ro":      "ron_Latn",   # Romanian
+    "hu":      "hun_Latn",   # Hungarian
+    "el":      "ell_Grek",   # Greek
+    # Middle East / South Asia
+    "ar":      "arb_Arab",   # Arabic (Modern Standard)
+    "he":      "heb_Hebr",   # Hebrew
+    "hi":      "hin_Deva",   # Hindi
+    "bn":      "ben_Beng",   # Bengali
+    "tr":      "tur_Latn",   # Turkish
+    # Southeast / South Asia
+    "vi":      "vie_Latn",   # Vietnamese
+    "th":      "tha_Thai",   # Thai
+    "id":      "ind_Latn",   # Indonesian
+    "ms":      "zsm_Latn",   # Malay
+}
+
+
+def _guess_nllb_src_lang(text: str) -> str:
+    """Auto-detect source language and return NLLB language code."""
+    if re.search(r"[\u4e00-\u9fff\u3400-\u4dbf]", text):
+        return "zho_Hans"
+    if re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", text):
+        return "jpn_Jpan"
+    if re.search(r"[\uac00-\ud7af]", text):
+        return "kor_Hang"
+    if re.search(r"[\u0e00-\u0e7f]", text):
+        return "tha_Thai"
+    if re.search(r"[\u0900-\u097f]", text):
+        return "hin_Deva"
+    if re.search(r"[\u0980-\u09ff]", text):
+        return "ben_Beng"
+    if re.search(r"[\u0600-\u06ff]", text):
+        return "arb_Arab"
+    if re.search(r"[\u0590-\u05ff]", text):
+        return "heb_Hebr"
+    if re.search(r"[\u0400-\u04ff]", text):
+        return "rus_Cyrl"
+    return "eng_Latn"
+
 WM_HOTKEY = 0x0312
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
@@ -570,9 +632,10 @@ class EngineWorker(QObject):
     chat_done = Signal(int, str)
     failed = Signal(int, str)
 
-    def __init__(self, engine: CoreEngine, qwen_model_path: Path | None = None) -> None:
+    def __init__(self, engine: CoreEngine, qwen_model_path: Path | None = None, flavor: str = "opus") -> None:
         super().__init__()
         self._engine = engine
+        self._flavor = str(flavor or "opus").strip().lower()
         self._llm_cfg: LlmConfig | None = None
         self._local_qwen: LocalQwen | None = None
         self._qwen_model_path: Path | None = None
@@ -780,11 +843,11 @@ class AppController(QObject):
 
         self._popup_close_timer = QTimer(self)
         self._popup_close_timer.setSingleShot(True)
-        self._popup_close_timer.timeout.connect(self._popup.close)
+        self._popup_close_timer.timeout.connect(self._popup_close_tick)
 
         self._shot_close_timer = QTimer(self)
         self._shot_close_timer.setSingleShot(True)
-        self._shot_close_timer.timeout.connect(self._shot_overlay.close)
+        self._shot_close_timer.timeout.connect(self._shot_close_tick)
 
         self._busy_image = False
         self._next_req_id = 1
@@ -799,8 +862,10 @@ class AppController(QObject):
         self._f1_timer.setInterval(15)
         self._f1_timer.timeout.connect(self._poll_f1_clipboard)
 
+        self._last_pixmap: QPixmap | None = None
+
         self._thread = QThread()
-        self._worker = EngineWorker(engine, qwen_model_path=qwen_model_path)
+        self._worker = EngineWorker(engine, qwen_model_path=qwen_model_path, flavor=flavor)
         self._worker.moveToThread(self._thread)
         self.request_text_en2zh.connect(self._worker.translate_en2zh, Qt.QueuedConnection)
         self.request_text_zh2en.connect(self._worker.translate_zh2en, Qt.QueuedConnection)
@@ -822,6 +887,10 @@ class AppController(QObject):
         self._dashboard.copy_source_requested.connect(self._dashboard_copy_source)
         self._dashboard.copy_target_requested.connect(self._dashboard_copy_target)
         self._dashboard.clear_requested.connect(self._dashboard_clear)
+        self._dashboard.theme_changed.connect(self._on_theme_changed)
+
+        self._shot_overlay.copy_image_requested.connect(self._copy_screenshot_image)
+
         self._store = SettingsStore()
         self._chat = ChatWindow()
         self._chat.message_submitted.connect(self._on_chat_message)
@@ -830,7 +899,9 @@ class AppController(QObject):
         self._sync_llm_settings()
 
         if self._flavor == "nllb":
-            self._dashboard.set_backend_info("NLLB 1.3B (OpenNMT CT2 int8)")
+            # Show which NLLB size is loaded based on the model directory name
+            nllb_size = "3.3B" if "3.3b" in str(getattr(engine, "_nllb_model_dir", "")).lower() else "1.3B"
+            self._dashboard.set_backend_info(f"NLLB {nllb_size} (CT2 int8)")
         elif self._flavor == "qwen":
             self._dashboard.set_backend_info("Qwen3 (local GGUF)")
         else:
@@ -841,6 +912,17 @@ class AppController(QObject):
         self._f1_timer.stop()
         self._thread.quit()
         self._thread.wait(1500)
+
+    def _on_theme_changed(self, theme: str, font_size: int) -> None:
+        """Propagate theme change to all popups."""
+        self._popup.apply_theme(theme, font_size)
+        self._shot_overlay.apply_theme(theme, font_size)
+        self._chat.apply_theme(theme, font_size)
+
+    def _copy_screenshot_image(self) -> None:
+        """Copy the last captured screenshot pixmap to clipboard."""
+        if self._last_pixmap is not None and not self._last_pixmap.isNull():
+            QApplication.clipboard().setPixmap(self._last_pixmap)
 
     def on_hotkey_f4(self) -> None:
         self._sync_llm_settings()
@@ -906,7 +988,7 @@ class AppController(QObject):
         }
 
         self._popup.open_f1(anchor, "", "读取选中文本...")
-        self._popup_close_timer.start(8000)
+        self._start_popup_countdown()
         self._dismiss_hooks.enable()
 
         _refocus(hwnd)
@@ -937,20 +1019,9 @@ class AppController(QObject):
         if text and (seq_now != seq0 or text != initial_text):
             self._f1_timer.stop()
             self._f1_ctx = None
-            self._popup.open_f1(anchor, text, "Translating...")
+            self._popup.open_f1(anchor, text, "翻译中...")
             req_id = self._alloc_req_id()
-            is_zh = bool(re.search(r"[\u4e00-\u9fff]", text))
-            if self._flavor == "qwen":
-                target_lang = "en" if is_zh else "zh"
-                use_api = False
-                self._pending[req_id] = ("F1_LLM", (anchor, text))
-                self.request_llm_translate.emit(req_id, text, target_lang, bool(use_api))
-            else:
-                self._pending[req_id] = ("F1", (anchor, text, is_zh))
-                if is_zh:
-                    self.request_text_zh2en.emit(req_id, text)
-                else:
-                    self.request_text_en2zh.emit(req_id, text)
+            self._dispatch_translation("F1", req_id, text, anchor=anchor)
             return
 
         elapsed = time.monotonic() - t0
@@ -964,39 +1035,24 @@ class AppController(QObject):
             self._f1_timer.stop()
             self._f1_ctx = None
             if text:
-                self._popup.open_f1(anchor, text, "Translating...")
+                self._popup.open_f1(anchor, text, "翻译中...")
                 req_id = self._alloc_req_id()
-                is_zh = bool(re.search(r"[\u4e00-\u9fff]", text))
-                if self._flavor == "qwen":
-                    target_lang = "en" if is_zh else "zh"
-                    use_api = False
-                    self._pending[req_id] = ("F1_LLM", (anchor, text))
-                    self.request_llm_translate.emit(req_id, text, target_lang, bool(use_api))
-                else:
-                    self._pending[req_id] = ("F1", (anchor, text, is_zh))
-                    if is_zh:
-                        self.request_text_zh2en.emit(req_id, text)
-                    else:
-                        self.request_text_en2zh.emit(req_id, text)
+                self._dispatch_translation("F1", req_id, text, anchor=anchor)
                 return
             if initial_text:
-                self._popup.open_f1(anchor, initial_text, "Translating...")
+                self._popup.open_f1(anchor, initial_text, "翻译中...")
                 req_id = self._alloc_req_id()
-                is_zh = bool(re.search(r"[\u4e00-\u9fff]", initial_text))
-                if self._flavor == "qwen":
-                    target_lang = "en" if is_zh else "zh"
-                    use_api = False
-                    self._pending[req_id] = ("F1_LLM", (anchor, initial_text))
-                    self.request_llm_translate.emit(req_id, initial_text, target_lang, bool(use_api))
-                else:
-                    self._pending[req_id] = ("F1", (anchor, initial_text, is_zh))
-                    if is_zh:
-                        self.request_text_zh2en.emit(req_id, initial_text)
-                    else:
-                        self.request_text_en2zh.emit(req_id, initial_text)
+                self._dispatch_translation("F1", req_id, initial_text, anchor=anchor)
                 return
-            self._popup.show_error(anchor, "F1 (EN→ZH)", "未获取到选中文本（请确保已选中文字）")
-            self._popup_close_timer.start(4000)
+            self._popup.show_error(
+                anchor,
+                "F1 划词失败",
+                "未获取到选中文本。\n\n可能原因：\n"
+                "① 当前页面禁止复制（PDF/受保护文档）\n"
+                "② 未选中任何文字\n\n"
+                "提示：可按 F2 手动输入文本翻译",
+            )
+            self._start_popup_countdown()
             return
 
     def on_hotkey_f2(self) -> None:
@@ -1007,18 +1063,7 @@ class AppController(QObject):
             self._popup.set_f2_translating()
             req_id = self._alloc_req_id()
             self._f2_req_id = req_id
-            is_zh = bool(re.search(r"[\u4e00-\u9fff]", text or ""))
-            if self._flavor == "qwen":
-                target_lang = "en" if is_zh else "zh"
-                use_api = False
-                self._pending[req_id] = ("F2_LLM", None)
-                self.request_llm_translate.emit(req_id, text, target_lang, bool(use_api))
-            else:
-                self._pending[req_id] = ("F2", is_zh)
-                if is_zh:
-                    self.request_text_zh2en.emit(req_id, text)
-                else:
-                    self.request_text_en2zh.emit(req_id, text)
+            self._dispatch_translation("F2", req_id, text)
 
         self._popup.open_f2(anchor, _enter)
         self._dismiss_hooks.enable()
@@ -1031,10 +1076,130 @@ class AppController(QObject):
             return
         self._overlay.begin()
 
+    def _dispatch_translation(
+        self,
+        mode: str,
+        req_id: int,
+        text: str,
+        anchor: QPoint | None = None,
+        hwnd: int | None = None,
+    ) -> None:
+        """Central translation dispatcher. Respects source/target language settings."""
+        src_lang = self._store.get_source_language()   # "auto" or "zh","en","ja",...
+        tgt_lang = self._store.get_target_language()   # "auto" or "zh","en",...
+
+        is_zh = bool(re.search(r"[\u4e00-\u9fff]", text))
+
+        # ── Qwen flavor ───────────────────────────────────────────────────────
+        if self._flavor == "qwen":
+            # Determine target_lang for Qwen
+            if tgt_lang and tgt_lang != "auto":
+                resolved_tgt = tgt_lang
+            elif src_lang and src_lang != "auto":
+                resolved_tgt = "en" if src_lang == "zh" else "zh"
+            else:
+                resolved_tgt = "en" if is_zh else "zh"
+
+            if mode == "F1":
+                self._pending[req_id] = ("F1_LLM", (anchor, text))
+            elif mode == "F2":
+                self._pending[req_id] = ("F2_LLM", None)
+            elif mode == "F2_COMMIT":
+                self._pending[req_id] = ("F2_COMMIT_LLM", (hwnd, text))
+            elif mode == "F3":
+                self._pending[req_id] = ("F3_LLM", (anchor, text))
+            else:
+                self._pending[req_id] = (mode, None)
+            self.request_llm_translate.emit(req_id, text, resolved_tgt, False)
+            return
+
+        # ── NLLB flavor ───────────────────────────────────────────────────────
+        if self._flavor == "nllb":
+            if src_lang and src_lang != "auto":
+                resolved_src = _NLLB_LANG_MAP.get(src_lang, "eng_Latn")
+            else:
+                resolved_src = _guess_nllb_src_lang(text)
+
+            if tgt_lang and tgt_lang != "auto":
+                resolved_tgt = _NLLB_LANG_MAP.get(tgt_lang, "")
+            else:
+                resolved_tgt = "eng_Latn" if resolved_src != "eng_Latn" else "zho_Hans"
+
+            if resolved_tgt and resolved_tgt != resolved_src:
+                if mode == "F1":
+                    self._pending[req_id] = ("F1", (anchor, text, False))
+                elif mode == "F2":
+                    self._pending[req_id] = ("F2", False)
+                elif mode == "F2_COMMIT":
+                    self._pending[req_id] = ("F2_COMMIT", (hwnd, text, False))
+                else:
+                    self._pending[req_id] = (mode, None)
+                self.request_text_nllb.emit(req_id, text, resolved_src, resolved_tgt)
+            else:
+                # Same lang or no tgt → no-op
+                if mode == "F1":
+                    self._pending[req_id] = ("F1", (anchor, text, False))
+                else:
+                    self._pending[req_id] = (mode, None)
+                self.request_text_nllb.emit(req_id, text, resolved_src, resolved_tgt or "eng_Latn")
+            return
+
+        # ── Opus flavor (zh ↔ en only) ─────────────────────────────────────
+        if src_lang and src_lang != "auto":
+            force_is_zh = (src_lang == "zh")
+        else:
+            force_is_zh = is_zh
+
+        if mode == "F1":
+            self._pending[req_id] = ("F1", (anchor, text, force_is_zh))
+        elif mode == "F2":
+            self._pending[req_id] = ("F2", force_is_zh)
+        elif mode == "F2_COMMIT":
+            self._pending[req_id] = ("F2_COMMIT", (hwnd, text, force_is_zh))
+        else:
+            self._pending[req_id] = (mode, force_is_zh)
+
+        if force_is_zh:
+            self.request_text_zh2en.emit(req_id, text)
+        else:
+            self.request_text_en2zh.emit(req_id, text)
+
     def _alloc_req_id(self) -> int:
         rid = self._next_req_id
         self._next_req_id += 1
         return rid
+
+    def _autoclose_ms(self) -> int:
+        try:
+            secs = int(self._store.get_popup_autoclose_secs())
+        except Exception:
+            secs = 8
+        return max(0, secs) * 1000
+
+    def _start_popup_countdown(self) -> None:
+        self._popup_close_timer.stop()
+        ms = self._autoclose_ms()
+        if ms > 0:
+            self._popup_close_timer.start(ms)
+
+    def _start_shot_countdown(self) -> None:
+        self._shot_close_timer.stop()
+        ms = self._autoclose_ms()
+        if ms > 0:
+            self._shot_close_timer.start(ms)
+
+    def _popup_close_tick(self) -> None:
+        # 鼠标悬停在弹窗上说明用户还在阅读，延迟关闭
+        if self._popup.isVisible() and self._popup.geometry().contains(QCursor.pos()):
+            self._popup_close_timer.start(2000)
+            return
+        self._popup.close()
+
+    def _shot_close_tick(self) -> None:
+        if self._shot_overlay.isVisible() and self._shot_overlay.geometry().contains(QCursor.pos()):
+            self._shot_close_timer.start(2000)
+            return
+        self._shot_overlay.close()
 
     def _on_popup_dismissed(self) -> None:
         self._popup_close_timer.stop()
@@ -1053,7 +1218,8 @@ class AppController(QObject):
         if self._busy_image:
             return
         self._busy_image = True
-        self._shot_overlay.open_for_rect(rect, "Recognizing...")
+        self._last_pixmap = pixmap  # store for clipboard copy
+        self._shot_overlay.open_for_rect(rect, "识别中...")
         self._dismiss_hooks.enable()
         req_id = self._alloc_req_id()
         self._pending[req_id] = ("F3", rect)
@@ -1069,7 +1235,7 @@ class AppController(QObject):
                 st = self._engine.status()
                 translated = (st.zh2en_error if is_zh else st.en2zh_error) or "No translation result"
             self._popup.open_f1(anchor, source, translated)
-            self._popup_close_timer.start(8000)
+            self._start_popup_countdown()
             self._last_context = {"title": "F1 划词", "source": str(source or ""), "translated": str(translated or "")}
             return
 
@@ -1077,7 +1243,7 @@ class AppController(QObject):
             anchor, source = payload
             translated = (translated or "").strip() or "No translation result"
             self._popup.open_f1(anchor, source, translated)
-            self._popup_close_timer.start(8000)
+            self._start_popup_countdown()
             self._last_context = {"title": "F1 划词", "source": str(source or ""), "translated": str(translated or "")}
             return
 
@@ -1136,14 +1302,15 @@ class AppController(QObject):
             self._last_context = {"title": "仪表盘翻译", "source": str(self._dashboard.get_source_text() or ""), "translated": str(translated or "")}
             return
 
-        if mode == "F3_LLM":
+        if mode in ("F3_LLM", "F3_NLLB"):
             rect, source = payload
-            translated = (translated or "").strip() or "No translation result"
+            translated = (translated or "").strip() or "未获得翻译结果"
             self._last_shot_source = (source or "").strip()
             self._last_shot_target = translated
             self._last_shot_rect = rect
-            self._shot_overlay.open_for_rect(rect, translated)
-            self._shot_close_timer.start(12000)
+            display = f"{self._last_shot_source}\n─────\n{translated}" if self._last_shot_source else translated
+            self._shot_overlay.open_for_rect(rect, display)
+            self._start_shot_countdown()
             self._last_context = {"title": "F3 截图", "source": str(self._last_shot_source or ""), "translated": str(self._last_shot_target or "")}
             return
 
@@ -1161,27 +1328,49 @@ class AppController(QObject):
         self._last_shot_rect = rect
         self._last_context = {"title": "F3 截图", "source": str(self._last_shot_source or ""), "translated": str(self._last_shot_target or "")}
 
+        # Qwen: run translation separately (OCR only in process_image for qwen)
         if self._flavor == "qwen" and self._last_shot_source and not self._last_shot_target:
             self._shot_overlay.open_for_rect(rect, "翻译中...")
-            self._shot_close_timer.start(16000)
+            self._start_shot_countdown()
             req2 = self._alloc_req_id()
-            use_api = False
             target_lang = self._dashboard.get_target_language()
             if not target_lang or target_lang == "auto":
                 target_lang = guess_target_lang(self._last_shot_source)
             self._pending[req2] = ("F3_LLM", (rect, self._last_shot_source))
-            self.request_llm_translate.emit(req2, self._last_shot_source, target_lang, bool(use_api))
+            self.request_llm_translate.emit(req2, self._last_shot_source, target_lang, False)
             return
 
-        text = (target or "").strip()
-        if not text:
-            text = (source or "").strip()
-        if not text:
+        # NLLB with user-specified source language: re-translate with explicit codes
+        if self._flavor == "nllb" and self._last_shot_source:
+            src_lang_sel = self._store.get_source_language()
+            tgt_lang_sel = self._dashboard.get_target_language()
+            if src_lang_sel and src_lang_sel != "auto":
+                nllb_src = _NLLB_LANG_MAP.get(src_lang_sel, "eng_Latn")
+                nllb_tgt = (_NLLB_LANG_MAP.get(tgt_lang_sel, "") if tgt_lang_sel and tgt_lang_sel != "auto"
+                            else ("eng_Latn" if nllb_src != "eng_Latn" else "zho_Hans"))
+                if nllb_tgt and nllb_tgt != nllb_src:
+                    self._shot_overlay.open_for_rect(rect, "翻译中...")
+                    self._start_shot_countdown()
+                    req2 = self._alloc_req_id()
+                    self._pending[req2] = ("F3_NLLB", (rect, self._last_shot_source))
+                    self.request_text_nllb.emit(req2, self._last_shot_source, nllb_src, nllb_tgt)
+                    return
+
+        # Build display: show source + translation if both exist
+        src_txt = (source or "").strip()
+        tgt_txt = (target or "").strip()
+        if src_txt and tgt_txt:
+            text = f"{src_txt}\n─────\n{tgt_txt}"
+        elif tgt_txt:
+            text = tgt_txt
+        elif src_txt:
+            text = src_txt
+        else:
             st = self._engine.status()
-            text = st.ocr_error or "No text detected"
+            text = st.ocr_error or "未识别到文字"
 
         self._shot_overlay.open_for_rect(rect, text)
-        self._shot_close_timer.start(12000)
+        self._start_shot_countdown()
 
     @Slot(int, str)
     def _on_failed(self, req_id: int, error: str) -> None:
@@ -1193,10 +1382,10 @@ class AppController(QObject):
             self._dashboard.raise_()
             self._dashboard.activateWindow()
             return
-        if mode == "F3_LLM":
+        if mode in ("F3_LLM", "F3_NLLB"):
             rect, _source = _payload
-            self._shot_overlay.open_for_rect(rect, error or "Error")
-            self._shot_close_timer.start(12000)
+            self._shot_overlay.open_for_rect(rect, error or "翻译失败")
+            self._start_shot_countdown()
             return
         if mode == "CHAT":
             self._chat.append_status(f"错误：{error or ''}".strip())
@@ -1225,64 +1414,56 @@ class AppController(QObject):
         src = (self._dashboard.get_source_text() or "").strip()
         if not src:
             return
-        target_lang = self._dashboard.get_target_language()
+        src_lang_sel = self._dashboard.get_source_language()   # "auto"|"zh"|"en"|...
+        tgt_lang_sel = self._dashboard.get_target_language()   # "auto"|"zh"|"en"|...
 
-        self._dashboard.set_target_text("Translating...")
+        self._dashboard.set_target_text("翻译中...")
         req_id = self._alloc_req_id()
+
+        # ── Qwen ──────────────────────────────────────────────────────────────
         if self._flavor == "qwen":
-            if target_lang == "auto":
-                target_lang = guess_target_lang(src)
+            if tgt_lang_sel == "auto":
+                tgt_lang_sel = guess_target_lang(src)
             self._pending[req_id] = ("DASH_LLM", None)
-            self.request_llm_translate.emit(req_id, src, target_lang, False)
+            self.request_llm_translate.emit(req_id, src, tgt_lang_sel, False)
             return
 
+        # ── NLLB ──────────────────────────────────────────────────────────────
         if self._flavor == "nllb":
-            tgt_map = {
-                "zh": "zho_Hans",
-                "en": "eng_Latn",
-                "ja": "jpn_Jpan",
-                "ko": "kor_Hang",
-                "fr": "fra_Latn",
-                "de": "deu_Latn",
-                "es": "spa_Latn",
-                "ru": "rus_Cyrl",
-            }
-
-            def guess_src_lang(text: str) -> str:
-                if re.search(r"[\u4e00-\u9fff]", text):
-                    return "zho_Hans"
-                if re.search(r"[\u3040-\u30ff]", text):
-                    return "jpn_Jpan"
-                if re.search(r"[\uac00-\ud7af]", text):
-                    return "kor_Hang"
-                if re.search(r"[\u0400-\u04ff]", text):
-                    return "rus_Cyrl"
-                return "eng_Latn"
-
-            src_lang = guess_src_lang(src)
-            if target_lang == "auto":
-                tgt_lang = "eng_Latn" if src_lang == "zho_Hans" else "zho_Hans"
+            if src_lang_sel and src_lang_sel != "auto":
+                nllb_src = _NLLB_LANG_MAP.get(src_lang_sel, "eng_Latn")
             else:
-                tgt_lang = tgt_map.get(target_lang, "")
-                if not tgt_lang:
+                nllb_src = _guess_nllb_src_lang(src)
+
+            if tgt_lang_sel and tgt_lang_sel != "auto":
+                nllb_tgt = _NLLB_LANG_MAP.get(tgt_lang_sel, "")
+                if not nllb_tgt:
                     self._dashboard.set_target_text("该目标语言当前未配置")
                     return
-            if tgt_lang == src_lang:
+            else:
+                nllb_tgt = "eng_Latn" if nllb_src != "eng_Latn" else "zho_Hans"
+
+            if nllb_tgt == nllb_src:
                 self._dashboard.set_target_text(src)
                 return
             self._pending[req_id] = ("DASH", None)
-            self.request_text_nllb.emit(req_id, src, src_lang, tgt_lang)
+            self.request_text_nllb.emit(req_id, src, nllb_src, nllb_tgt)
             return
 
-        if target_lang not in ("auto", "zh", "en"):
-            self._dashboard.set_target_text("该目标语言需要使用其他版本")
+        # ── Opus (zh ↔ en) ────────────────────────────────────────────────────
+        if tgt_lang_sel not in ("auto", "zh", "en"):
+            self._dashboard.set_target_text("该目标语言需要使用其他版本（请选择 NLLB 或 API 模式）")
             return
 
         is_zh = bool(re.search(r"[\u4e00-\u9fff]", src))
-        if target_lang == "auto":
-            target_lang = "en" if is_zh else "zh"
+        if src_lang_sel and src_lang_sel != "auto":
+            is_zh = (src_lang_sel == "zh")
+
+        if tgt_lang_sel == "auto":
+            tgt_lang_sel = "en" if is_zh else "zh"
+
         self._pending[req_id] = ("DASH", None)
-        if target_lang == "en":
+        if tgt_lang_sel == "en":
             if is_zh:
                 self.request_text_zh2en.emit(req_id, src)
             else:
@@ -1300,18 +1481,7 @@ class AppController(QObject):
         hwnd = int(self._f2_target_hwnd or GetForegroundWindow())
         self._popup.set_f2_translating()
         req_id = self._alloc_req_id()
-        is_zh = bool(re.search(r"[\u4e00-\u9fff]", src))
-        if self._flavor == "qwen":
-            target_lang = "en" if is_zh else "zh"
-            use_api = False
-            self._pending[req_id] = ("F2_COMMIT_LLM", (hwnd, src))
-            self.request_llm_translate.emit(req_id, src, target_lang, bool(use_api))
-        else:
-            self._pending[req_id] = ("F2_COMMIT", (hwnd, src, is_zh))
-            if is_zh:
-                self.request_text_zh2en.emit(req_id, src)
-            else:
-                self.request_text_en2zh.emit(req_id, src)
+        self._dispatch_translation("F2_COMMIT", req_id, src, hwnd=hwnd)
 
     def _on_f2_canceled_with_paste(self, text: str) -> None:
         src = (text or "").strip()
@@ -1405,6 +1575,11 @@ def main() -> int:
         if flavor == "qwen":
             rel = Path("qwen3-1.7b-q4.gguf")
         elif flavor == "nllb":
+            # Prefer 3.3B if available, fall back to 1.3B
+            rel = Path("nllb-200-3.3b-int8") / "model.bin"
+            for cand in models_candidates:
+                if (cand / rel).exists():
+                    return cand.resolve()
             rel = Path("nllb-200-1.3b-int8") / "model.bin"
         else:
             rel = Path("opus-mt-en-zh-int8") / "model.bin"
@@ -1420,7 +1595,12 @@ def main() -> int:
     models_root = _pick_models_root()
     model_dir_en2zh = (models_root / "opus-mt-en-zh-int8").resolve()
     model_dir_zh2en = (models_root / "opus-mt-zh-en-int8").resolve()
-    nllb_dir = (models_root / "nllb-200-1.3b-int8").resolve()
+
+    # NLLB: prefer 3.3B, fall back to 1.3B
+    nllb_dir_3b = (models_root / "nllb-200-3.3b-int8").resolve()
+    nllb_dir_1b = (models_root / "nllb-200-1.3b-int8").resolve()
+    nllb_dir = nllb_dir_3b if (nllb_dir_3b / "model.bin").exists() else nllb_dir_1b
+
     qwen_model_path = (models_root / "qwen3-1.7b-q4.gguf").resolve()
 
     icon = _make_logo_icon()
@@ -1526,6 +1706,13 @@ def main() -> int:
         flavor=flavor,
         qwen_model_path=qwen_model_path if flavor == "qwen" else None,
     )
+
+    # Apply saved theme to popups on startup
+    _init_theme = store.get_theme()
+    _init_fs = store.get_font_size()
+    controller._popup.apply_theme(_init_theme, _init_fs)
+    controller._shot_overlay.apply_theme(_init_theme, _init_fs)
+    controller._chat.apply_theme(_init_theme, _init_fs)
 
     _apply_hotkeys()
 

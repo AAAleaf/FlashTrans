@@ -1,55 +1,32 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal, QEvent, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication
-from PySide6.QtWidgets import QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QClipboard
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QHBoxLayout,
+    QVBoxLayout,
+    QWidget,
+)
+
+from main_window import _build_popup_qss
 
 
-_QSS_POPUP = """
-QWidget#PopupCard {
-    background: rgba(18, 20, 24, 245);
-    border: 2px solid rgba(88, 135, 255, 220);
-    border-radius: 12px;
-    color: #ffffff;
-    font-family: "Microsoft YaHei UI";
-    font-size: 12px;
-}
-QLineEdit {
-    background: rgba(10, 12, 16, 255);
-    border: 1px solid rgba(255, 255, 255, 60);
-    border-radius: 10px;
-    padding: 8px 10px;
-    color: #ffffff;
-    selection-background-color: rgba(88, 135, 255, 160);
-}
-QLabel {
-    padding: 6px 10px;
-    color: #ffffff;
-}
-QLabel#PopupTitle {
-    font-size: 14px;
-    font-weight: 600;
-    padding: 6px 10px;
-}
-QPlainTextEdit {
-    background: rgba(10, 12, 16, 255);
-    border: 1px solid rgba(255, 255, 255, 60);
-    border-radius: 10px;
-    padding: 8px 10px;
-    color: #ffffff;
-    selection-background-color: rgba(88, 135, 255, 160);
-}
-QPushButton {
-    background: rgba(25, 28, 36, 255);
-    border: 1px solid rgba(255, 255, 255, 60);
-    border-radius: 8px;
-    padding: 6px 10px;
-    color: #ffffff;
-}
-QPushButton:hover {
-    background: rgba(35, 40, 52, 255);
-}
-"""
+# 卡片四周留白，用于绘制 iOS 风格投影
+_SHADOW_MARGIN = 16
+
+
+def _attach_card_shadow(card: QWidget) -> None:
+    shadow = QGraphicsDropShadowEffect(card)
+    shadow.setBlurRadius(36)
+    shadow.setOffset(0, 6)
+    shadow.setColor(QColor(0, 0, 0, 90))
+    card.setGraphicsEffect(shadow)
 
 
 def _clamp_to_screen(pos: QPoint, size, margin: int = 8) -> QPoint:
@@ -78,6 +55,7 @@ class _ClickAwayFilter(QObject):
             if not self._widget.geometry().contains(gp):
                 self._widget.close()
         return False
+
 
 class _ImeAwareLineEdit(QLineEdit):
     submitted = Signal()
@@ -147,15 +125,16 @@ class FloatingPopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(_SHADOW_MARGIN, _SHADOW_MARGIN, _SHADOW_MARGIN, _SHADOW_MARGIN)
         outer.setSpacing(0)
 
         self._card = QWidget(self)
         self._card.setObjectName("PopupCard")
+        _attach_card_shadow(self._card)
         outer.addWidget(self._card)
 
         layout = QVBoxLayout(self._card)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
 
         self.title_label = QLabel("翻译", self._card)
@@ -169,19 +148,26 @@ class FloatingPopup(QWidget):
         self.source_view.setReadOnly(True)
         self.source_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.source_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.source_view.setMinimumWidth(280)
+        self.source_view.setMinimumWidth(300)
 
         self.target_view = QPlainTextEdit(self._card)
         self.target_view.setReadOnly(True)
         self.target_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.target_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.target_view.setMinimumWidth(280)
+        self.target_view.setMinimumWidth(300)
+
+        # Copy target button
+        self._btn_copy = QPushButton("复制译文", self._card)
+        self._btn_copy.setFixedHeight(26)
+        self._btn_copy.clicked.connect(self._copy_target)
 
         layout.addWidget(self.title_label)
         layout.addWidget(self.input_edit)
         layout.addWidget(self.source_view)
         layout.addWidget(self.target_view)
-        self.setStyleSheet(_QSS_POPUP)
+        layout.addWidget(self._btn_copy, 0, Qt.AlignRight)
+
+        self.apply_theme("dark", 12)
 
         self._mode = "idle"
         self._enter_callback = None
@@ -195,6 +181,14 @@ class FloatingPopup(QWidget):
         self.input_edit.submitted.connect(self._on_enter)
         self.input_edit.textChanged.connect(self._on_text_changed)
 
+    def apply_theme(self, theme: str, font_size: int = 12) -> None:
+        self.setStyleSheet(_build_popup_qss(theme, font_size))
+
+    def _copy_target(self) -> None:
+        text = self.target_view.toPlainText()
+        if text and text not in ("翻译中...", "Translating...", "未获得翻译结果", "No translation result"):
+            QApplication.clipboard().setText(text)
+
     def open_f1(self, anchor: QPoint, source: str, translated: str) -> None:
         self._mode = "F1"
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -203,6 +197,8 @@ class FloatingPopup(QWidget):
         self.source_view.show()
         self.source_view.setPlainText((source or "").strip())
         self.target_view.setPlainText((translated or "").strip() or "未获得翻译结果")
+        self._btn_copy.show()
+        self._btn_copy.setEnabled(bool(translated and translated not in ("未获得翻译结果", "No translation result", "Translating...")))
         self._show_at(anchor, activate=False)
 
     def open_f2(self, anchor: QPoint, enter_callback) -> None:
@@ -217,6 +213,7 @@ class FloatingPopup(QWidget):
         self._auto_commit = False
         self.source_view.hide()
         self.target_view.setPlainText("")
+        self._btn_copy.hide()
         self._show_at(anchor, activate=True)
         self.input_edit.setFocus()
 
@@ -228,12 +225,14 @@ class FloatingPopup(QWidget):
         self.source_view.show()
         self.source_view.setPlainText((source or "").strip())
         self.target_view.setPlainText((translated or "").strip())
+        self._btn_copy.show()
         self._show_at(anchor, activate=False)
 
     def set_f2_translating(self) -> None:
         if self._mode != "F2":
             return
         self.target_view.setPlainText("翻译中...")
+        self._btn_copy.setEnabled(False)
         self.adjustSize()
 
     def set_f2_result(self, translated: str) -> None:
@@ -241,6 +240,7 @@ class FloatingPopup(QWidget):
             return
         result = (translated or "").strip() or "未获得翻译结果"
         self.target_view.setPlainText(result)
+        self._btn_copy.setEnabled(bool(result and result != "未获得翻译结果"))
         self.adjustSize()
         self._auto_commit = False
 
@@ -251,6 +251,7 @@ class FloatingPopup(QWidget):
         self.input_edit.hide()
         self.source_view.hide()
         self.target_view.setPlainText(message or "")
+        self._btn_copy.hide()
         self._show_at(anchor, activate=False)
 
     def keyPressEvent(self, event) -> None:
@@ -304,8 +305,9 @@ class FloatingPopup(QWidget):
 
     def _apply_size_constraints(self, geom: QRect) -> None:
         margin = 24
-        max_w = max(320, min(440, geom.width() - margin))
-        self.setMinimumWidth(320)
+        pad = _SHADOW_MARGIN * 2
+        max_w = max(320 + pad, min(460 + pad, geom.width() - margin))
+        self.setMinimumWidth(320 + pad)
         self.setMaximumWidth(max_w)
 
         max_text_h = max(90, min(140, int(geom.height() * 0.22)))
@@ -356,10 +358,10 @@ class FloatingPopup(QWidget):
         self._click_filter = None
 
 
-
 class ScreenshotResultOverlay(QWidget):
     dismissed = Signal()
     extract_requested = Signal()
+    copy_image_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -367,34 +369,69 @@ class ScreenshotResultOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(_SHADOW_MARGIN, _SHADOW_MARGIN, _SHADOW_MARGIN, _SHADOW_MARGIN)
         outer.setSpacing(0)
 
         self._card = QWidget(self)
         self._card.setObjectName("PopupCard")
+        _attach_card_shadow(self._card)
         outer.addWidget(self._card)
 
         layout = QVBoxLayout(self._card)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
+
+        self.title_label = QLabel("截图识别", self._card)
+        self.title_label.setObjectName("PopupTitle")
+        layout.addWidget(self.title_label)
 
         self.text_view = QPlainTextEdit(self._card)
         self.text_view.setReadOnly(True)
         self.text_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.text_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.text_view.setMinimumWidth(280)
+        self.text_view.setMinimumWidth(300)
         layout.addWidget(self.text_view)
 
-        self.extract_button = QPushButton("提取文字到仪表盘", self._card)
-        self.extract_button.clicked.connect(self.extract_requested.emit)
-        layout.addWidget(self.extract_button, 0, Qt.AlignRight)
+        # Buttons row
+        btn_row = QWidget(self._card)
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(6)
 
-        self.setStyleSheet(_QSS_POPUP)
+        self._btn_copy_img = QPushButton("复制截图", self._card)
+        self._btn_copy_img.setToolTip("复制截图图片到剪贴板 (Ctrl+V 粘贴)")
+        self._btn_copy_img.clicked.connect(self.copy_image_requested.emit)
+
+        self._btn_copy_text = QPushButton("复制文字", self._card)
+        self._btn_copy_text.clicked.connect(self._copy_text)
+
+        self.extract_button = QPushButton("发送到仪表盘", self._card)
+        self.extract_button.clicked.connect(self.extract_requested.emit)
+
+        btn_layout.addWidget(self._btn_copy_img)
+        btn_layout.addWidget(self._btn_copy_text)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(self.extract_button)
+        layout.addWidget(btn_row)
+
+        self.apply_theme("dark", 12)
         self._click_filter: _ClickAwayFilter | None = None
+        self._last_text = ""
+
+    def apply_theme(self, theme: str, font_size: int = 12) -> None:
+        self.setStyleSheet(_build_popup_qss(theme, font_size))
+
+    def _copy_text(self) -> None:
+        text = self.text_view.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
 
     def open_for_rect(self, rect: QRect, text: str) -> None:
+        self._last_text = text or ""
         self.text_view.setPlainText(text or "")
-        self.extract_button.setEnabled(bool(text and text not in ("识别中...", "翻译中...")))
+        is_result = bool(text and text not in ("识别中...", "翻译中...", "Recognizing...", "Translating..."))
+        self.extract_button.setEnabled(is_result)
+        self._btn_copy_text.setEnabled(is_result)
 
         screen = QGuiApplication.screenAt(rect.center())
         if screen is None:
@@ -406,11 +443,11 @@ class ScreenshotResultOverlay(QWidget):
 
         self.adjustSize()
         size = self.size()
-        target = QRect(0, 0, max(280, size.width()), max(100, size.height()))
+        target = QRect(0, 0, max(300, size.width()), max(100, size.height()))
         x = rect.left()
         y_below = rect.bottom() + 10
         target.moveTo(x, y_below)
-        
+
         if not screen_geom.contains(target):
             if not screen_geom.intersects(target):
                 target.moveCenter(screen_geom.center())
@@ -425,7 +462,7 @@ class ScreenshotResultOverlay(QWidget):
                     target.moveLeft(screen_geom.left() + 10)
                 if target.top() < screen_geom.top():
                     target.moveTop(screen_geom.top() + 10)
-        
+
         self.setGeometry(target)
         self.show()
         self.raise_()

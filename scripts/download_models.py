@@ -22,15 +22,8 @@ def _require_hf() -> tuple[object, object]:
     return snapshot_download, None
 
 
-def _download_nllb(models_dir: Path) -> None:
-    snapshot_download, _ = _require_hf()
-    out_dir = (models_dir / "nllb-200-1.3b-int8").resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id="OpenNMT/nllb-200-distilled-1.3B-ct2-int8",
-        local_dir=str(out_dir),
-        local_dir_use_symlinks=False,
-    )
+def _ensure_spm(out_dir: Path) -> None:
+    """Ensure source.spm and target.spm exist (fallback download if missing)."""
     src = out_dir / "source.spm"
     tgt = out_dir / "target.spm"
     if not src.exists():
@@ -40,13 +33,44 @@ def _download_nllb(models_dir: Path) -> None:
             "/resolve/main/flores200_sacrebleu_tokenizer_spm.model"
         )
         try:
+            print(f"  Downloading tokenizer from fallback URL...")
             urlretrieve(url, tmp)
             tmp.replace(src)
+            print(f"  Saved to {src}")
         finally:
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
     if src.exists() and not tgt.exists():
         shutil.copyfile(src, tgt)
+        print(f"  Copied source.spm → target.spm")
+
+
+def _download_nllb_1b3(models_dir: Path) -> None:
+    snapshot_download, _ = _require_hf()
+    out_dir = (models_dir / "nllb-200-1.3b-int8").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading NLLB 1.3B int8 → {out_dir}")
+    snapshot_download(
+        repo_id="OpenNMT/nllb-200-distilled-1.3B-ct2-int8",
+        local_dir=str(out_dir),
+        local_dir_use_symlinks=False,
+    )
+    _ensure_spm(out_dir)
+    print("NLLB 1.3B download complete.")
+
+
+def _download_nllb_3b3(models_dir: Path) -> None:
+    snapshot_download, _ = _require_hf()
+    out_dir = (models_dir / "nllb-200-3.3b-int8").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading NLLB 3.3B int8 (~1.8 GB) → {out_dir}")
+    snapshot_download(
+        repo_id="OpenNMT/nllb-200-3.3B-ct2-int8",
+        local_dir=str(out_dir),
+        local_dir_use_symlinks=False,
+    )
+    _ensure_spm(out_dir)
+    print("NLLB 3.3B download complete.")
 
 
 def _download_qwen(models_dir: Path, variant: str) -> None:
@@ -72,9 +96,10 @@ def _download_qwen(models_dir: Path, variant: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Download FlashTrans offline models")
     parser.add_argument("--models-dir", default="models", help="Models directory (default: ./models)")
-    parser.add_argument("--nllb", action="store_true", help="Download NLLB CTranslate2 model")
+    parser.add_argument("--nllb", action="store_true", help="Download NLLB 1.3B distilled int8")
+    parser.add_argument("--nllb-3b", action="store_true", help="Download NLLB 3.3B int8 (better quality, ~1.8 GB)")
     parser.add_argument("--qwen", action="store_true", help="Download Qwen3 GGUF model")
     parser.add_argument("--qwen-variant", default="Q4_K_XL", help="GGUF quant variant pattern (default: Q4_K_XL)")
     parser.add_argument("--hf-endpoint", default="", help="Override Hugging Face endpoint (e.g. https://hf-mirror.com)")
@@ -91,11 +116,13 @@ def main() -> int:
     models_dir = Path(args.models_dir).resolve()
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    if not args.nllb and not args.qwen:
-        parser.error("Specify at least one of --nllb or --qwen")
+    if not args.nllb and not getattr(args, "nllb_3b", False) and not args.qwen:
+        parser.error("Specify at least one of --nllb, --nllb-3b, or --qwen")
 
     if args.nllb:
-        _download_nllb(models_dir)
+        _download_nllb_1b3(models_dir)
+    if getattr(args, "nllb_3b", False):
+        _download_nllb_3b3(models_dir)
     if args.qwen:
         _download_qwen(models_dir, args.qwen_variant)
 

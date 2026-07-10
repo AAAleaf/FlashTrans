@@ -55,8 +55,10 @@ if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 if (!(Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
 if (!(Test-Path $AssetsDir)) { New-Item -ItemType Directory -Path $AssetsDir | Out-Null }
 
-& $VenvPy (Join-Path $ProjectRoot "scripts\\generate_icon.py") --out $IconPath
-if (!(Test-Path $IconPath)) { throw "Icon generation failed: $IconPath" }
+if (!(Test-Path $IconPath)) {
+  & $VenvPy (Join-Path $ProjectRoot "scripts\\generate_icon.py") --out $IconPath
+}
+if (!(Test-Path $IconPath)) { throw "Icon not found: $IconPath" }
 
 if (-not [string]::IsNullOrWhiteSpace($Flavor)) {
   $env:FLASHTRANS_FLAVOR = $Flavor
