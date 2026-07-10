@@ -1390,6 +1390,24 @@ fn start_bridge(backend: &str, model: &str) -> Result<BridgeSession, String> {
     })
 }
 
+fn session_io(session: &mut BridgeSession, payload: &Value) -> Result<Value, String> {
+    let line = serde_json::to_string(payload).map_err(|e| e.to_string())? + "\n";
+    session.stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    session.stdin.flush().map_err(|e| e.to_string())?;
+
+    let mut out = String::new();
+    session.stdout.read_line(&mut out).map_err(|e| e.to_string())?;
+    if out.trim().is_empty() {
+        return Err("本地模型 bridge 没有返回结果".into());
+    }
+    let v: Value = serde_json::from_str(out.trim()).map_err(|e| e.to_string())?;
+    if v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        Ok(v)
+    } else {
+        Err(v.get("error").and_then(Value::as_str).unwrap_or("本地模型执行失败").to_string())
+    }
+}
+
 fn bridge_request(state: &AppState, backend: &str, model: &str, mut payload: Value) -> Result<Value, String> {
     let key = format!("{backend}|{model}");
     let mut guard = state.bridge.lock().unwrap();
@@ -1401,22 +1419,60 @@ fn bridge_request(state: &AppState, backend: &str, model: &str, mut payload: Val
     if !payload.is_object() {
         payload = json!({});
     }
-    let line = serde_json::to_string(&payload).map_err(|e| e.to_string())? + "\n";
-    session.stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-    session.stdin.flush().map_err(|e| e.to_string())?;
+    let res = session_io(session, &payload);
+    if res.is_err() && matches!(res, Err(ref e) if e.contains("没有返回结果")) {
+        *guard = None; // 进程大概率已死，下次请求重启
+    }
+    res
+}
 
-    let mut out = String::new();
-    session.stdout.read_line(&mut out).map_err(|e| e.to_string())?;
-    if out.trim().is_empty() {
+/// OCR 走 bridge：复用当前已有的 bridge 会话（不打断翻译模型），没有则起一个
+/// 轻量会话（backend=nllb, model 空 —— OCR 与翻译模型无关）。
+fn bridge_ocr(state: &AppState, image_b64: &str) -> Result<String, String> {
+    let payload = json!({ "op": "ocr_image", "imageB64": image_b64 });
+    let mut guard = state.bridge.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(start_bridge("nllb", "")?);
+    }
+    let session = guard.as_mut().ok_or("bridge 未启动")?;
+    let res = session_io(session, &payload);
+    if res.is_err() && matches!(res, Err(ref e) if e.contains("没有返回结果")) {
         *guard = None;
-        return Err("本地模型 bridge 没有返回结果".into());
     }
-    let v: Value = serde_json::from_str(out.trim()).map_err(|e| e.to_string())?;
-    if v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        Ok(v)
-    } else {
-        Err(v.get("error").and_then(Value::as_str).unwrap_or("本地模型执行失败").to_string())
+    res.map(|v| v.get("source").and_then(Value::as_str).unwrap_or("").to_string())
+}
+
+/// 是否 CJK（换行合并时 CJK 相接不加空格）
+fn is_cjk_char(c: char) -> bool {
+    let u = c as u32;
+    (0x3400..=0x9FFF).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0x3040..=0x30FF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0x3000..=0x303F).contains(&u)
+        || (0xFF00..=0xFFEF).contains(&u)
+}
+
+/// OCR 逐行结果 → 自然段落：段内换行（上一行不是以句末标点结尾）合并，
+/// CJK 相接不加空格、其余加空格；句末标点后保留换行。
+/// 屏幕上一段被 UI 折行成多行是常态，不合并会带来"莫名其妙的换行"且拖累翻译质量。
+fn normalize_ocr_lines(s: &str) -> String {
+    let mut out = String::new();
+    for line in s.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if out.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let prev = out.chars().last().unwrap_or(' ');
+        let next = line.chars().next().unwrap_or(' ');
+        if matches!(prev, '。' | '！' | '？' | '!' | '?' | '；' | ';' | '：' | ':') {
+            out.push('\n');
+        } else if !(is_cjk_char(prev) || is_cjk_char(next)) {
+            out.push(' ');
+        }
+        out.push_str(line);
     }
+    out
 }
 
 #[derive(Deserialize)]
@@ -1639,10 +1695,21 @@ struct NativeOcrRequest {
     source_lang: String,
 }
 
-/// 对一张 base64 PNG（框选裁剪结果）做 Windows 原生 OCR，返回识别文本
+/// 截图 OCR：中/英优先走 bridge 的 RapidOCR（中文特训模型，质量远超系统 OCR），
+/// bridge 不可用或其他语种回退 Windows 原生 OCR。
 #[tauri::command]
-async fn native_ocr(req: NativeOcrRequest) -> Result<Value, String> {
+async fn native_ocr(app: AppHandle, req: NativeOcrRequest) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        // RapidOCR 的默认模型只覆盖中英；日韩俄等语种仍用系统对应语言引擎
+        let rapid_ok = matches!(req.source_lang.trim(), "" | "auto" | "zh" | "zh-Hant" | "en");
+        if rapid_ok {
+            let state = app.state::<AppState>();
+            if let Ok(text) = bridge_ocr(state.inner(), &req.image_b64) {
+                if !text.trim().is_empty() {
+                    return Ok(json!({ "source": normalize_ocr_lines(&text) }));
+                }
+            }
+        }
         use base64::Engine as _;
         let raw = req.image_b64.split(',').last().unwrap_or("");
         let bytes = base64::engine::general_purpose::STANDARD
@@ -1657,7 +1724,7 @@ async fn native_ocr(req: NativeOcrRequest) -> Result<Value, String> {
             let _ = (w, h);
             String::new()
         };
-        Ok(json!({ "source": source }))
+        Ok(json!({ "source": normalize_ocr_lines(&source) }))
     })
     .await
     .map_err(|e| e.to_string())?

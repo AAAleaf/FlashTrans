@@ -1,7 +1,10 @@
-# 本地 CT2 翻译桥接（backend_bridge.py）依赖 — 开发时安装到仓库根目录的 .venv：
+# 本地桥接（backend_bridge.py）依赖 — 开发时安装到仓库根目录的 .venv：
 #   ..\.venv\Scripts\pip install -r requirements-bridge.txt
 # 发布时用 scripts/build_bridge.ps1 冻结成 flashtrans-bridge.exe 随安装包分发，
 # 最终用户无需安装 Python。
-# 注：GGUF 大模型与 OCR 已由 Rust 原生实现，不再需要 llama-cpp-python / rapidocr。
+# 注：GGUF 大模型由 Rust 原生实现；OCR 用 RapidOCR（中/英质量远超系统 OCR）。
 ctranslate2
 sentencepiece
+rapidocr_onnxruntime
+pillow
+numpy

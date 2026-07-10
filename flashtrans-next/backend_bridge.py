@@ -1,8 +1,10 @@
-"""FlashTrans 本地 CT2 翻译桥接（NLLB / Opus-MT）。
+"""FlashTrans 本地桥接：CT2 翻译（NLLB / Opus-MT）+ RapidOCR 截图识别。
 
-自包含：只依赖 ctranslate2 + sentencepiece（见 requirements-bridge.txt），
-不再引用 v1 的 core_engine.py（那会拖进 PySide6 等无关依赖）。
-GGUF 大模型与 OCR 均已由 Rust 原生实现，不经此桥接。
+自包含：依赖 ctranslate2 + sentencepiece + rapidocr_onnxruntime + pillow
+（见 requirements-bridge.txt），不引用 v1 的 core_engine.py。
+GGUF 大模型由 Rust 原生实现，不经此桥接。
+OCR：RapidOCR（中文特训的 PaddleOCR 模型）对中/英截图质量远超 Windows
+原生 OCR（真实截图实测），Rust 端优先走这里、失败回退 Windows OCR。
 
 协议：stdin 每行一个 JSON 请求，stdout 每行一个 JSON 响应（UTF-8）。
 打包：scripts/build_bridge.ps1 用 PyInstaller 冻结成 flashtrans-bridge.exe，
@@ -253,6 +255,36 @@ class Bridge:
         self._nllb: Ct2Translator | None = None
         self._opus_en2zh: Ct2Translator | None = None
         self._opus_zh2en: Ct2Translator | None = None
+        self._ocr = None
+
+    def ensure_ocr(self):
+        if self._ocr is None:
+            from rapidocr_onnxruntime import RapidOCR
+
+            self._ocr = RapidOCR()
+        return self._ocr
+
+    def ocr_image(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """识别一张 base64 PNG（F3 框选裁剪结果），逐行返回文本。"""
+        import base64
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        b64 = str(payload.get("imageB64") or "").split(",")[-1].strip()
+        img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+        # 小图放大有助识别；大图放大只会拖慢（det 内部会再缩放），不放
+        if max(img.size) < 600:
+            img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
+        arr = np.array(img)[:, :, ::-1]
+        result, _ = self.ensure_ocr()(arr)
+        lines = [
+            str(item[1]).strip()
+            for item in (result or [])
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and str(item[1]).strip()
+        ]
+        return {"source": "\n".join(lines)}
 
     def ensure_nllb(self) -> Ct2Translator:
         if self._nllb is None:
@@ -313,6 +345,8 @@ def handle(bridge: Bridge, payload: dict[str, Any]) -> dict[str, Any]:
     op = str(payload.get("op") or "").strip()
     if op == "translate":
         return ok(bridge.translate(payload))
+    if op == "ocr_image":
+        return ok(bridge.ocr_image(payload))
     if op == "ping":
         return ok({"backend": bridge.backend, "model": str(bridge.model)})
     raise RuntimeError(f"Unknown bridge operation: {op}")
