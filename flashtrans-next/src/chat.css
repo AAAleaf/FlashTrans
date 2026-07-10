@@ -1,0 +1,65 @@
+/* ── 对话窗口 ── */
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+.msgs { flex: 1; overflow-y: auto; padding: 8px 20px 16px; display: flex; flex-direction: column; gap: 14px; }
+
+.empty { margin: auto; text-align: center; color: var(--text-3); padding-bottom: 40px; }
+.empty-icon {
+  font-size: 30px; margin-bottom: 12px; color: var(--accent);
+  animation: fade-in 0.6s var(--ease) both;
+}
+.empty-title { font-size: 16px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
+.empty-sub { font-size: 12.5px; line-height: 1.6; }
+
+.msg { display: flex; flex-direction: column; max-width: 78%; animation: rise-in 0.3s var(--spring) both; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+.msg.ai { align-self: flex-start; align-items: flex-start; }
+.bubble {
+  padding: 10px 15px; border-radius: 18px; font-size: 14px; line-height: 1.65;
+  white-space: pre-wrap; user-select: text; -webkit-user-select: text;
+}
+.msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 6px; }
+.msg.ai .bubble { background: var(--surface-2); color: var(--text); border-bottom-left-radius: 6px; }
+.msg.ai .bubble.err { color: var(--danger); }
+.msg .quote {
+  font-size: 11.5px; color: var(--text-3); background: var(--surface);
+  border-left: 2.5px solid var(--accent); border-radius: 6px;
+  padding: 6px 10px; margin-bottom: 6px; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.composer { flex: 0 0 auto; padding: 8px 16px 16px; }
+.ctx-chip {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 11px;
+  padding: 7px 12px; font-size: 12px; animation: rise-in 0.25s var(--spring) both;
+}
+.ctx-label { color: var(--accent); font-weight: 600; flex: 0 0 auto; }
+.ctx-text { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.ctx-x {
+  border: 0; background: transparent; color: var(--text-3); cursor: pointer; font-size: 11px;
+  width: 20px; height: 20px; border-radius: 50%; flex: 0 0 auto;
+}
+.ctx-x:hover { background: var(--fill); color: var(--text); }
+
+.input-row {
+  display: flex; align-items: flex-end; gap: 10px;
+  background: var(--field); border: 1.5px solid transparent; border-radius: 22px;
+  padding: 8px 8px 8px 18px; transition: border-color 0.18s;
+}
+.input-row:focus-within { border-color: var(--accent); }
+.input-row textarea {
+  flex: 1; background: transparent; border: 0; outline: 0; resize: none;
+  color: var(--text); font: inherit; font-size: 14px; line-height: 1.55; max-height: 140px;
+  padding: 4px 0;
+}
+.input-row textarea::placeholder { color: var(--text-3); }
+.send {
+  width: 34px; height: 34px; border-radius: 50%; border: 0; cursor: pointer; flex: 0 0 auto;
+  background: var(--accent); color: #fff; display: grid; place-items: center;
+  transition: transform 0.15s var(--spring), filter 0.15s, opacity 0.2s;
+}
+.send:hover { filter: brightness(1.1); }
+.send:active { transform: scale(0.88); }
+.send:disabled { opacity: 0.35; pointer-events: none; }
+.send svg { width: 16px; height: 16px; }

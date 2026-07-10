@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FlashTrans 对话</title>
+    <link rel="stylesheet" href="/src/theme.css" />
+    <link rel="stylesheet" href="/src/chat.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="tb-app"><span class="tb-logo">✦</span>AI 对话</div>
+        <div class="tb-right">
+          <span class="badge" id="model-badge"></span>
+          <button class="iconbtn" id="btn-clear" title="清空对话"></button>
+          <div class="winctl">
+            <button class="iconbtn" id="tb-min" title="最小化"></button>
+            <button class="iconbtn" id="tb-max" title="缩放"></button>
+            <button class="iconbtn wc-close" id="tb-close" title="隐藏"></button>
+          </div>
+        </div>
+      </header>
+
+      <main class="msgs" id="msgs">
+        <div class="empty" id="empty">
+          <div class="empty-icon">✦</div>
+          <div class="empty-title">随时提问</div>
+          <div class="empty-sub">F4 全局呼出 · 划词弹窗里点「问 AI」可携带翻译上下文</div>
+        </div>
+      </main>
+
+      <footer class="composer">
+        <div class="ctx-chip" id="ctx-chip" style="display:none">
+          <span class="ctx-label">引用</span>
+          <span class="ctx-text" id="ctx-text"></span>
+          <button class="ctx-x" id="ctx-x">✕</button>
+        </div>
+        <div class="input-row">
+          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送…" spellcheck="false"></textarea>
+          <button class="send" id="btn-send" title="发送"></button>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/src/chat.ts"></script>
+  </body>
+</html>

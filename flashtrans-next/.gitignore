@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# 安装包 / CT2 桥接构建产物
+installer/Output/
+installer/bridge-dist/
+installer/bridge-work/
+
+# 移动端图标（tauri icon 生成的模板素材，本项目仅发布 Windows）
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

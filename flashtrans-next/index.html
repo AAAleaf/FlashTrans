@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FlashTrans</title>
+    <link rel="stylesheet" href="/src/theme.css" />
+    <link rel="stylesheet" href="/src/main.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- 标题栏 -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="tb-app"><span class="tb-logo">译</span>FlashTrans</div>
+        <div class="tb-right">
+          <span class="badge blue" id="backend-badge">未配置</span>
+          <button class="iconbtn" id="btn-chat" title="AI 对话 (F4)"></button>
+          <button class="iconbtn" id="btn-settings" title="设置"></button>
+          <div class="winctl">
+            <button class="iconbtn" id="tb-min" title="最小化"></button>
+            <button class="iconbtn" id="tb-max" title="缩放"></button>
+            <button class="iconbtn wc-close" id="tb-close" title="隐藏到托盘"></button>
+          </div>
+        </div>
+      </header>
+
+      <!-- 语言选择 -->
+      <div class="langbar">
+        <div id="dd-src"></div>
+        <button class="swap" id="btn-swap" title="交换语言"></button>
+        <div id="dd-tgt"></div>
+      </div>
+
+      <!-- 双栏 -->
+      <main class="panes">
+        <section class="pane src" id="pane-src">
+          <textarea id="src-text" placeholder="输入或粘贴文本…&#10;&#10;⌃ Enter 翻译" spellcheck="false"></textarea>
+          <div class="tools">
+            <button class="iconbtn" id="src-copy" title="复制原文"></button>
+            <button class="iconbtn" id="src-clear" title="清空"></button>
+            <span class="count" id="src-count"></span>
+          </div>
+        </section>
+        <section class="pane dst">
+          <div class="dst-scroll">
+            <div id="dst-text" class="dst-content"></div>
+            <div id="dst-skeleton" class="skeleton" style="display:none"><i></i><i></i><i></i></div>
+            <div id="dst-empty" class="dst-empty">译文将在这里出现</div>
+          </div>
+          <div class="tools">
+            <button class="iconbtn" id="dst-copy" title="复制译文"></button>
+          </div>
+        </section>
+      </main>
+
+      <!-- 底栏 -->
+      <footer class="actionbar">
+        <span class="hint">F1 划词 · F2 打字 · F4 对话 · F5 呼出 — 全局可用</span>
+        <button class="btn primary cta" id="btn-translate">翻译 <kbd>⌃⏎</kbd></button>
+      </footer>
+    </div>
+
+    <!-- 设置面板 -->
+    <div class="sheet-mask" id="sheet-mask"></div>
+    <aside class="sheet" id="sheet">
+      <div class="sheet-head">
+        <span class="sheet-title">设置</span>
+        <button class="iconbtn" id="sheet-close" title="关闭"></button>
+      </div>
+      <div class="sheet-body">
+        <div class="sec-label">外观</div>
+        <div class="card row-between">
+          <span>主题</span>
+          <div class="seg" id="seg-theme">
+            <button data-v="dark">深色</button>
+            <button data-v="light">浅色</button>
+          </div>
+        </div>
+        <div class="card row-between">
+          <span>界面缩放<small class="sub">字太大/太小时调整</small></span>
+          <div class="seg" id="seg-scale">
+            <button data-v="0.9">小</button>
+            <button data-v="1">标准</button>
+            <button data-v="1.15">大</button>
+            <button data-v="1.3">特大</button>
+          </div>
+        </div>
+
+        <div class="sec-label">翻译引擎</div>
+        <div class="card row-between">
+          <span>引擎</span>
+          <div class="seg" id="seg-engine">
+            <button data-v="local">本地离线</button>
+            <button data-v="api">在线 API</button>
+          </div>
+        </div>
+        <div class="card col" id="local-box">
+          <div class="row-between">
+            <label class="f-label" style="margin:0">本地模型</label>
+            <button class="btn small" id="models-refresh">刷新</button>
+          </div>
+          <div id="model-list" class="model-list"></div>
+          <div class="model-add">
+            <button class="btn small" id="add-gguf">＋ 添加 .gguf 大模型</button>
+            <button class="btn small" id="add-folder">＋ 添加模型文件夹</button>
+          </div>
+          <div class="models-dir">
+            <span id="models-dir-path"></span>
+            <button class="btn small" id="models-open">打开默认文件夹</button>
+          </div>
+          <div class="hk-note">两种方式任选：① 把模型放进上面的默认文件夹后点「刷新」；② 用上面的按钮直接从任意位置选择模型。点每个模型右侧的 ✎ 可自定义名称和备注。</div>
+        </div>
+        <div class="card row-between" id="ocr-box">
+          <span>OCR 纠错<small class="sub" id="ocr-hint">截图翻译时用大模型顺手改正识别错字</small></span>
+          <div class="seg" id="seg-ocr">
+            <button data-v="1">开</button>
+            <button data-v="0">关</button>
+          </div>
+        </div>
+
+        <div class="sec-label">翻译 API（OpenAI 兼容 · 自备 Key）</div>
+        <div class="card col">
+          <label class="f-label">Base URL</label>
+          <input class="f-input" id="api-base" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
+          <label class="f-label">Model</label>
+          <input class="f-input" id="api-model" placeholder="deepseek-chat / gpt-4o-mini / …" spellcheck="false" />
+          <label class="f-label">API Key</label>
+          <input class="f-input" id="api-key" type="password" placeholder="sk-…" spellcheck="false" />
+          <div class="row-end">
+            <button class="btn" id="api-test">测试连接</button>
+            <button class="btn tint" id="api-save">保存</button>
+          </div>
+        </div>
+
+        <div class="sec-label">悬浮弹窗</div>
+        <div class="card row-between">
+          <span>停留时间<small class="sub">悬停时不会关闭</small></span>
+          <div class="seg" id="seg-stay">
+            <button data-v="5">5s</button>
+            <button data-v="8">8s</button>
+            <button data-v="15">15s</button>
+            <button data-v="30">30s</button>
+            <button data-v="0">常驻</button>
+          </div>
+        </div>
+        <div class="card row-between">
+          <span>点击外部关闭<small class="sub">点弹窗以外任意处即关闭</small></span>
+          <div class="seg" id="seg-clickout">
+            <button data-v="1">开</button>
+            <button data-v="0">关</button>
+          </div>
+        </div>
+
+        <div class="sec-label">全局热键</div>
+        <div class="card col hotkey-list" id="hotkey-list">
+          <div class="hk-row" data-hk="f1"><span>划词翻译</span><button class="hk-btn" data-hk="f1"></button></div>
+          <div class="hk-row" data-hk="f2"><span>打字翻译</span><button class="hk-btn" data-hk="f2"></button></div>
+          <div class="hk-row" data-hk="f3"><span>截图翻译</span><button class="hk-btn" data-hk="f3"></button></div>
+          <div class="hk-row" data-hk="f4"><span>AI 对话</span><button class="hk-btn" data-hk="f4"></button></div>
+          <div class="hk-row" data-hk="f5"><span>显示 / 隐藏主窗口</span><button class="hk-btn" data-hk="f5"></button></div>
+          <div class="hk-note">点击右侧按钮后按下想要的组合键（如 Ctrl+Shift+A）。功能键 F1–F12 可单独使用，其他键需配合 Ctrl/Alt/Shift。按 Esc 取消录制，恢复默认点下方按钮。</div>
+          <div class="row-end"><button class="btn small" id="hk-reset">恢复默认</button></div>
+        </div>
+      </div>
+    </aside>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

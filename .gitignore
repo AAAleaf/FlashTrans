@@ -1,24 +1,18 @@
+# ── Python 虚拟环境 / 缓存（CT2 桥接开发用）──
 .venv/
 __pycache__/
 *.pyc
 *.pyd
 *.pyo
-*.log
-*.tmp
-*.bak
-*.old
-.env
-.env.*
-!.env.example
 .python-version
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
+# ── 构建产物 ──
 build/
 dist/
-*.spec
-!FlashTrans.spec
+target/
 Output/
 *.zip
 *.exe
@@ -26,32 +20,35 @@ Output/
 *.7z
 *.rar
 
-assets/icon.ico
+# ── 打包脚本本地产物（Inno Setup / PyInstaller）──
+*.iss
+*.spec
+!bridge.spec
 
-.DS_Store
-Thumbs.db
-
-.idea/
-.vscode/
-
-# Claude Code 本地 agent 配置 / 工作树（含 settings.local.json、临时 worktree）
-.claude/
-
-# 内部交接/开发笔记（含本机绝对路径，勿公开）
-design/HANDOFF.md
-
+# ── 模型与缓存（体积大，经网盘分发，不入库）──
 models/
 .cache/
 .tmp/
 
-# crash reports / dumps (may contain local paths)
-nuitka-crash-report.xml
+# ── 本地私有内容（内部笔记 / 设计稿 / agent 配置，含本机路径）──
+.claude/
+design/
+
+# ── 日志 / 崩溃转储（可能含本机路径）──
+*.log
+*.tmp
+*.bak
+*.old
 *.dmp
 *.dump
 *.stackdump
 *.minidump
+nuitka-crash-report.xml
 
-# local settings / exports (may contain personal information)
+# ── 环境变量 / 本地配置（可能含个人信息）──
+.env
+.env.*
+!.env.example
 *.reg
 *.ini
 *.toml.local
@@ -59,7 +56,7 @@ nuitka-crash-report.xml
 *.yml.local
 *.json.local
 
-# secrets / certs / keys
+# ── 密钥 / 证书 ──
 *.pem
 *.key
 *.pfx
@@ -69,42 +66,26 @@ nuitka-crash-report.xml
 *.crt
 *.cer
 
-# application data and logs
-*.log
+# ── 应用数据 ──
 *.sqlite
 *.db
 *.sqlite3
 *.db3
 
-# Windows specific
+# ── 系统 / IDE ──
+.DS_Store
+._*
+Thumbs.db
 Desktop.ini
 ehthumbs.db
 ehthumbs_vista.db
-
-# macOS specific
-.DS_Store
-._*
-
-# Linux specific
 *.swp
 *~
 .fuse_hidden*
-
-# IDE specific (additional)
+.idea/
+.vscode/
 .vs/
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
-
-# Inno Setup installation scripts (may contain GUIDs)
-*.iss
-
-# Python specific
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.mypy_cache/
-.ropeproject/
-.pytype/

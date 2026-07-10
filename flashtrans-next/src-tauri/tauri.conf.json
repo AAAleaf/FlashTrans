@@ -1,0 +1,114 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FlashTrans",
+  "mainBinaryName": "FlashTrans",
+  "version": "2.0.0",
+  "identifier": "com.chai1220.flashtrans",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "FlashTrans",
+        "url": "index.html",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 860,
+        "minHeight": 560,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": true,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        }
+      },
+      {
+        "label": "popup",
+        "title": "FlashTrans Popup",
+        "url": "popup.html",
+        "width": 440,
+        "height": 260,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        }
+      },
+      {
+        "label": "snip",
+        "title": "FlashTrans Snip",
+        "url": "snip.html",
+        "width": 800,
+        "height": 600,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "visible": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "pin",
+        "title": "FlashTrans Pin",
+        "url": "pin.html",
+        "width": 400,
+        "height": 300,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "chat",
+        "title": "FlashTrans 对话",
+        "url": "chat.html",
+        "width": 760,
+        "height": 600,
+        "minWidth": 520,
+        "minHeight": 420,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": false,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        }
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost; font-src 'self'; object-src 'none'; base-uri 'self'",
+      "devCsp": "default-src 'self' http://localhost:1420; script-src 'self' http://localhost:1420; style-src 'self' 'unsafe-inline' http://localhost:1420; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; font-src 'self'; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

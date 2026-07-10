@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FlashTrans Snip</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      body { cursor: crosshair; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+      #shot {
+        position: fixed; inset: 0; width: 100vw; height: 100vh;
+        object-fit: fill; pointer-events: none;
+      }
+      #sel {
+        position: fixed; display: none; pointer-events: none;
+        border: 2px solid #4a97ff;
+        outline: 1.5px solid rgba(255, 255, 255, 0.9);
+        box-shadow: 0 0 0 100000px rgba(0, 0, 0, 0.38);
+      }
+      #sel .size-tag {
+        position: absolute; top: -28px; left: 0;
+        background: rgba(20, 22, 28, 0.9); color: #fff; font-size: 12px;
+        padding: 3px 9px; border-radius: 7px; white-space: nowrap;
+      }
+      #hint {
+        position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+        background: rgba(20, 22, 28, 0.85); color: #eee; font-size: 13px;
+        padding: 8px 20px; border-radius: 20px; pointer-events: none;
+        backdrop-filter: blur(10px);
+      }
+      #dim-idle { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.38); pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <img id="shot" alt="" />
+    <div id="dim-idle"></div>
+    <div id="sel"><span class="size-tag" id="size-tag"></span></div>
+    <div id="hint">拖动框选要识别的区域 · Esc 取消</div>
+    <script type="module" src="/src/snip.ts"></script>
+  </body>
+</html>

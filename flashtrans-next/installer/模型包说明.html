@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FlashTrans · 模型使用说明</title>
+<style>
+  :root {
+    --bg: #f5f5f7; --card: #ffffff; --text: #1d1d1f; --text-2: #6e6e73; --text-3: #8a8a8f;
+    --accent: #007aff; --accent-soft: rgba(0,122,255,0.1); --line: rgba(0,0,0,0.08);
+    --ok: #34c759; --warn: #ff9f0a; --code-bg: rgba(0,0,0,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d; --card: #1e2128; --text: #f4f6f9; --text-2: #a0a6b0; --text-3: #6b7280;
+      --accent: #4c94ff; --accent-soft: rgba(76,148,255,0.14); --line: rgba(255,255,255,0.09);
+      --ok: #35d06a; --warn: #ffb340; --code-bg: rgba(255,255,255,0.07);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+    line-height: 1.7; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 40px 22px 80px; }
+  header { text-align: center; margin-bottom: 34px; }
+  .logo {
+    width: 58px; height: 58px; border-radius: 15px; margin: 0 auto 14px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), #40a0ff); color: #fff; font-size: 30px; font-weight: 700;
+    box-shadow: 0 8px 24px var(--accent-soft);
+  }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.5px; }
+  .sub { color: var(--text-2); font-size: 15px; }
+  h2 { font-size: 19px; margin: 34px 0 14px; display: flex; align-items: center; gap: 10px; }
+  h2 .n {
+    width: 26px; height: 26px; flex: 0 0 auto; border-radius: 8px; background: var(--accent); color: #fff;
+    font-size: 14px; display: grid; place-items: center; font-weight: 600;
+  }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px 22px; margin: 14px 0; }
+  p { margin: 8px 0; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  code, .path {
+    background: var(--code-bg); border-radius: 6px; padding: 1.5px 7px; font-size: 13.5px;
+    font-family: "Cascadia Code","Consolas",ui-monospace,monospace; word-break: break-all;
+  }
+  .btn { display: inline-block; background: var(--accent-soft); color: var(--accent); border-radius: 8px; padding: 2px 9px; font-weight: 600; font-size: 13.5px; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; }
+  .tag.ok { background: rgba(52,199,89,0.16); color: var(--ok); }
+  .tag.py { background: rgba(255,159,10,0.16); color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--text-2); font-weight: 600; font-size: 13px; }
+  .note { border-left: 3px solid var(--warn); background: rgba(255,159,10,0.08); border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 14px 0; font-size: 14.5px; }
+  .steps { counter-reset: s; list-style: none; padding: 0; margin: 10px 0; }
+  .steps li { counter-increment: s; position: relative; padding: 6px 0 6px 40px; }
+  .steps li::before {
+    content: counter(s); position: absolute; left: 0; top: 5px; width: 26px; height: 26px;
+    background: var(--accent-soft); color: var(--accent); border-radius: 50%; display: grid; place-items: center;
+    font-weight: 700; font-size: 13px;
+  }
+  .fill { color: var(--accent); font-weight: 600; }
+  footer { text-align: center; color: var(--text-3); font-size: 13px; margin-top: 40px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">T</div>
+    <h1>FlashTrans 模型使用说明</h1>
+    <div class="sub">划词 / 截图 · 极速翻译。装完这一步，选好翻译引擎就能用。</div>
+  </header>
+
+  <h2><span class="n">?</span>FlashTrans 需要什么</h2>
+  <div class="card">
+    <p>FlashTrans 本体很轻，<strong>不自带翻译模型</strong>。翻译能力来自你二选一（也可都配）的引擎：</p>
+    <ul>
+      <li><strong>本地离线模型</strong> —— 免费、私密、离线可用，适合快速查词看句。</li>
+      <li><strong>在线 API（自备 Key）</strong> —— 质量最好、要联网要 Key，适合追求“信、达、雅”的整段翻译。</li>
+    </ul>
+    <p style="color:var(--text-2);font-size:14px;margin-top:10px;">
+      定位小抄：<strong>离线小模型 = 即时 / 免费 / 私密的速查</strong>；<strong>API = 要精译时插个 Key</strong>。
+    </p>
+  </div>
+
+  <h2><span class="n">1</span>用在线 API（最简单，推荐先试）</h2>
+  <div class="card">
+    <p>打开主窗口 → 右上角 <span class="btn">⚙ 设置</span> → 「翻译引擎」选<strong>在线 API</strong>，填写任意 OpenAI 兼容接口：</p>
+    <ul>
+      <li><strong>Base URL</strong>、<strong>Model</strong>、<strong>API Key</strong> —— 支持 DeepSeek、Kimi、硅基流动、OpenAI 等。</li>
+      <li>点「测试连接」通过后保存即可。Key 只存在你本机，不上传。</li>
+    </ul>
+    <p style="color:var(--text-2);font-size:14px;">无需下载任何模型文件，配好即用。</p>
+  </div>
+
+  <h2><span class="n">2</span>用本地离线模型</h2>
+  <div class="card">
+    <p><strong>第一步：拿到模型。</strong>从作者提供的网盘下载模型包（视频简介 / 主页有链接）：</p>
+    <p class="note">📦 网盘地址（作者填写）：<span class="fill">在此粘贴你的网盘链接</span></p>
+
+    <p><strong>第二步：放到 FlashTrans 能找到的地方。</strong>两种方式任选：</p>
+    <ol class="steps">
+      <li>设置 → 「本地模型」→ 点 <span class="btn">打开默认文件夹</span>，把整个模型（文件夹或 <code>.gguf</code> 文件）放进去，回设置点<span class="btn">刷新</span>。</li>
+      <li>或直接点 <span class="btn">＋ 添加 .gguf 大模型</span> / <span class="btn">＋ 添加模型文件夹</span>，从<strong>任意位置</strong>（含网盘下载目录）选中模型 —— 无需搬动文件。</li>
+    </ol>
+    <p><strong>第三步：</strong>在模型列表里点选它，右上角徽章显示「本地 · …」即生效。点每个模型右侧 <span class="btn">✎</span> 还能自定义名称备注。</p>
+  </div>
+
+  <h2><span class="n">3</span>模型类型 & 兼容性</h2>
+  <div class="card">
+    <table>
+      <tr><th>类型</th><th>长相</th><th>运行要求</th></tr>
+      <tr>
+        <td><strong>GGUF 大模型</strong><br><span class="tag ok">开箱即用</span></td>
+        <td>单个 <code>.gguf</code> 文件</td>
+        <td>原生推理，<strong>无需任何额外环境</strong>。可做翻译，也能进 F4 对话。</td>
+      </tr>
+      <tr>
+        <td><strong>Opus-MT（中英）</strong><br><span class="tag ok">开箱即用</span></td>
+        <td>文件夹，内含 <code>model.bin</code></td>
+        <td>轻量中英互译、速度最快。由随包安装的翻译引擎驱动，<strong>无需任何额外环境</strong>。</td>
+      </tr>
+      <tr>
+        <td><strong>NLLB-200</strong><br><span class="tag ok">开箱即用</span></td>
+        <td>文件夹，内含 <code>model.bin</code></td>
+        <td>200 语种离线翻译。同样<strong>无需任何额外环境</strong>。</td>
+      </tr>
+    </table>
+    <div class="note">
+      <strong>三类模型都开箱即用：</strong>下载后放进默认文件夹（或用「添加模型」直接选中），在列表里点一下即可开始翻译。
+      不确定选哪个？<strong>只翻中英</strong>选 Opus-MT（最小最快）；<strong>要多语种</strong>选 NLLB；
+      <strong>想要翻译质量更高、还能对话</strong>选 GGUF 大模型（对电脑性能要求也更高）。
+    </div>
+  </div>
+
+  <h2><span class="n">4</span>常用快捷键</h2>
+  <div class="card">
+    <table>
+      <tr><th>键</th><th>功能</th></tr>
+      <tr><td><code>F1</code></td><td>划词翻译（选中文字后按）</td></tr>
+      <tr><td><code>F2</code></td><td>手动输入翻译</td></tr>
+      <tr><td><code>F3</code></td><td>截图框选 → OCR 识别 → 翻译</td></tr>
+      <tr><td><code>F4</code></td><td>AI 对话窗（需 GGUF 或 API）</td></tr>
+      <tr><td><code>F5</code></td><td>打开 / 唤起主窗口</td></tr>
+    </table>
+    <p style="color:var(--text-2);font-size:13.5px;">快捷键都可在 设置 → 全局热键 里自定义。</p>
+  </div>
+
+  <footer>FlashTrans · 本体开源于 GitHub，模型经网盘分发 —— 模型体积大、且各人需求不同，故与本体分离。<br>祝使用愉快 🐟</footer>
+</div>
+</body>
+</html>

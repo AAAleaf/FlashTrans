@@ -1,0 +1,247 @@
+/* ═══════════════════════════════════════════════════════════
+   FlashTrans 设计系统 — Apple / iOS 风格
+   窗口本体开启 Win11 亚克力，因此背景使用半透明 tint
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* 深色：蓝黑基调 + 下沉式输入区，层次更分明 */
+  --tint: rgba(20, 23, 31, 0.78);          /* 窗口底色 tint（叠在亚克力上）*/
+  --tint-solid: #1d2029;
+  --surface: rgba(255, 255, 255, 0.055);
+  --surface-2: rgba(255, 255, 255, 0.11);
+  --field: rgba(8, 10, 16, 0.32);          /* 输入区向下凹陷，与窗口拉开层次 */
+  --text: #f4f6f9;
+  --text-2: #9aa1ae;
+  --text-3: #5c6270;
+  --accent: #3f8cff;
+  --accent-2: #7ab8ff;
+  --accent-tint: rgba(63, 140, 255, 0.16);
+  --hairline: rgba(255, 255, 255, 0.09);
+  --fill: rgba(125, 132, 148, 0.22);
+  --fill-hover: rgba(125, 132, 148, 0.34);
+  --danger: #ff5449;
+  --green: #35d06a;
+  --shadow-menu: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 130px);
+  --spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+html.light {
+  /* 浅色：降低 tint 不透明度，让亚克力磨砂透出来 */
+  --tint: rgba(246, 247, 250, 0.60);
+  --tint-solid: #f5f5f7;
+  --surface: rgba(255, 255, 255, 0.55);
+  --surface-2: rgba(255, 255, 255, 0.92);
+  --field: rgba(255, 255, 255, 0.68);
+  --text: #1d1d1f;
+  --text-2: #73737a;
+  --text-3: #ababb2;
+  --accent: #007aff;
+  --accent-2: #40a0ff;
+  --accent-tint: rgba(0, 122, 255, 0.12);
+  --hairline: rgba(0, 0, 0, 0.08);
+  --fill: rgba(120, 120, 128, 0.15);
+  --fill-hover: rgba(120, 120, 128, 0.25);
+  --danger: #ff3b30;
+  --green: #34c759;
+  --shadow-menu: 0 16px 48px rgba(40, 50, 70, 0.30);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0) 130px);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+               "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  color: var(--text);
+  background: var(--sheen), var(--tint);
+  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
+  transition: background 0.35s var(--ease), color 0.3s var(--ease);
+  cursor: default;
+}
+
+::selection { background: var(--accent); color: #fff; }
+textarea, input, [contenteditable] { user-select: text; -webkit-user-select: text; }
+
+/* ── 滚动条 ── */
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-thumb { background: var(--fill); border-radius: 4px; background-clip: padding-box; border: 1.5px solid transparent; }
+::-webkit-scrollbar-thumb:hover { background: var(--fill-hover); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── 标题栏 ── */
+.titlebar {
+  display: flex; align-items: center; height: 48px; padding: 0 10px 0 16px; gap: 10px;
+  flex: 0 0 auto; position: relative;
+}
+.tb-app {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 13px; font-weight: 600; letter-spacing: 0.3px; pointer-events: none;
+}
+.tb-logo {
+  width: 21px; height: 21px; border-radius: 7px; color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 40%, transparent);
+  display: grid; place-items: center; font-size: 11px; font-weight: 800;
+}
+.titlebar .tb-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* 窗口控制按钮：右侧单色，非 macOS 交通灯 */
+.winctl {
+  display: flex; align-items: center; gap: 2px;
+  margin-left: 6px; padding-left: 10px; border-left: 1px solid var(--hairline);
+}
+.winctl .iconbtn svg { width: 14px; height: 14px; }
+.winctl .wc-close:hover {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
+}
+
+/* ── 通用控件 ── */
+.iconbtn {
+  width: 30px; height: 30px; border-radius: 9px; border: 0; background: transparent;
+  color: var(--text-2); cursor: pointer; display: grid; place-items: center;
+  transition: background 0.16s var(--ease), color 0.16s, transform 0.12s;
+}
+.iconbtn:hover { background: var(--fill); color: var(--text); }
+.iconbtn:active { transform: scale(0.9); }
+.iconbtn svg { width: 17px; height: 17px; }
+
+.btn {
+  border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 500;
+  color: var(--text); background: var(--fill); padding: 7px 16px; border-radius: 18px;
+  transition: background 0.16s var(--ease), transform 0.14s var(--spring), filter 0.15s;
+}
+.btn:hover { background: var(--fill-hover); }
+.btn:active { transform: scale(0.95); }
+.btn.tint { background: var(--accent-tint); color: var(--accent); font-weight: 600; }
+.btn.primary {
+  background: var(--accent); color: #fff; font-weight: 600;
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.btn.primary:hover { filter: brightness(1.1); }
+.btn:disabled { opacity: 0.45; pointer-events: none; }
+
+.badge {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.3px;
+  padding: 3.5px 10px; border-radius: 20px; display: inline-flex; align-items: center; gap: 5px;
+  color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent);
+}
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge.blue { color: var(--accent); background: var(--accent-tint); }
+
+/* ── 分段控件 ── */
+.seg { display: inline-flex; background: var(--fill); border-radius: 9px; padding: 2px; gap: 2px; }
+.seg button {
+  border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 12.5px;
+  padding: 5px 14px; border-radius: 7px; cursor: pointer; font-weight: 500;
+  transition: all 0.2s var(--ease);
+}
+.seg button.on { background: var(--surface-2); color: var(--text); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2); }
+
+/* ── 自定义下拉 ── */
+.dd { position: relative; }
+.dd-btn {
+  display: inline-flex; align-items: center; gap: 7px; justify-content: center;
+  background: var(--fill); border: 0; color: var(--text); font: inherit; font-size: 13.5px;
+  font-weight: 500; padding: 8px 16px; border-radius: 20px; cursor: pointer;
+  transition: background 0.16s; min-width: 132px;
+}
+.dd-btn:hover { background: var(--fill-hover); }
+.dd-btn .chev { font-size: 9px; color: var(--text-2); transition: transform 0.25s var(--spring); }
+.dd.open .dd-btn .chev { transform: rotate(180deg); }
+.dd-menu {
+  position: absolute; top: calc(100% + 6px); left: 50%; z-index: 100;
+  min-width: 172px; max-height: 320px; overflow-y: auto;
+  background: var(--tint-solid); border: 1px solid var(--hairline); border-radius: 13px;
+  box-shadow: var(--shadow-menu); padding: 5px;
+  opacity: 0; transform: translateX(-50%) translateY(-6px) scale(0.96);
+  transform-origin: top center; pointer-events: none;
+  transition: opacity 0.18s var(--ease), transform 0.22s var(--spring);
+}
+.dd.open .dd-menu { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); pointer-events: auto; }
+.dd-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 8px;
+  font-size: 13px; cursor: pointer; color: var(--text); transition: background 0.12s;
+}
+.dd-item:hover { background: var(--accent); color: #fff; }
+.dd-item .check { width: 14px; flex: 0 0 auto; font-size: 12px; color: var(--accent); }
+.dd-item:hover .check { color: #fff; }
+
+/* 可搜索下拉（语言选择） */
+.dd-search .dd-menu { min-width: 244px; }
+/* 固定的搜索头：与菜单同底色，让列表在其下滚动，四角随菜单裁圆 */
+.dd-head {
+  position: sticky; top: -5px; z-index: 1;
+  margin: -5px -5px 4px; padding: 5px 5px 6px; background: var(--tint-solid);
+}
+/* 搜索框沿用表单字段观感（圆角内嵌 + 聚焦强调色描边） */
+.dd-filter {
+  width: 100%; box-sizing: border-box;
+  background: var(--fill); border: 1.5px solid transparent; border-radius: 9px;
+  color: var(--text); font: inherit; font-size: 13px; padding: 7px 11px; outline: 0;
+  transition: border-color 0.18s, background 0.2s;
+}
+.dd-filter:focus { border-color: var(--accent); background: var(--fill-hover); }
+.dd-filter::placeholder { color: var(--text-3); }
+.dd-list { display: flex; flex-direction: column; gap: 2px; }
+.dd-item.hl { background: var(--accent); color: #fff; }
+.dd-item.hl .check { color: #fff; }
+/* 单行：中文名 + 弱化英文名（超宽省略），保持与原列表一致的清爽密度 */
+.dd-text { flex: 1; display: flex; align-items: baseline; gap: 7px; min-width: 0; overflow: hidden; }
+.dd-name { flex: 0 0 auto; }
+.dd-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-item.hl .dd-sub, .dd-item:hover .dd-sub { color: rgba(255, 255, 255, 0.78); }
+.dd-empty { padding: 16px 12px; text-align: center; color: var(--text-3); font-size: 12.5px; }
+
+/* ── 加载骨架 ── */
+.skeleton i {
+  display: block; height: 12px; border-radius: 6px; margin: 12px 0;
+  background: linear-gradient(90deg, var(--fill) 25%, var(--fill-hover) 50%, var(--fill) 75%);
+  background-size: 200% 100%; animation: shimmer 1.1s linear infinite;
+}
+.skeleton i:nth-child(1) { width: 90%; }
+.skeleton i:nth-child(2) { width: 72%; }
+.skeleton i:nth-child(3) { width: 50%; }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* ── 流式光标 ── */
+.stream-caret {
+  display: inline-block; width: 8px; height: 15px; border-radius: 2px;
+  background: var(--accent); vertical-align: -2px; margin-left: 2px;
+  animation: blink 0.9s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ── 入场动画 ── */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── 表单 ── */
+.f-label { font-size: 12px; color: var(--text-2); font-weight: 500; margin-bottom: 6px; display: block; }
+.f-input {
+  width: 100%; background: var(--field); border: 1.5px solid transparent; border-radius: 11px;
+  color: var(--text); font: inherit; font-size: 13.5px; padding: 9px 13px; outline: 0;
+  transition: border-color 0.18s, background 0.2s;
+}
+.f-input:focus { border-color: var(--accent); }
+.f-input::placeholder { color: var(--text-3); }
+
+/* ── 提示吐司 ── */
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(16px);
+  background: var(--tint-solid); border: 1px solid var(--hairline); color: var(--text);
+  font-size: 13px; font-weight: 500; padding: 9px 20px; border-radius: 22px;
+  box-shadow: var(--shadow-menu); opacity: 0; pointer-events: none; z-index: 999;
+  transition: opacity 0.25s var(--ease), transform 0.3s var(--spring);
+  display: flex; align-items: center; gap: 8px;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast .ok-ic { color: var(--green); font-weight: 700; }

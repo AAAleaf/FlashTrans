@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FlashTrans Popup</title>
+    <link rel="stylesheet" href="/src/theme.css" />
+    <link rel="stylesheet" href="/src/popup.css" />
+  </head>
+  <body>
+    <div id="pop">
+      <div class="head" data-tauri-drag-region>
+        <span class="tag" id="tag" data-tauri-drag-region>划词翻译</span>
+        <button class="x" id="btn-close" title="关闭">✕</button>
+      </div>
+
+      <!-- F1 模式 -->
+      <div id="view-f1" style="display:none">
+        <div class="src-line" id="f1-src"></div>
+        <div class="divider"></div>
+        <div class="dst-line" id="f1-dst"></div>
+        <div class="foot">
+          <button class="chip tint" id="f1-copy">复制译文</button>
+          <button class="chip" id="f1-copysrc">复制原文</button>
+          <button class="chip" id="f1-ask">问 AI</button>
+          <button class="chip" id="f1-copyimg" style="display:none">复制截图</button>
+          <button class="chip" id="f1-pin" style="display:none">贴图</button>
+          <div class="ring-wrap" id="ring-wrap" style="display:none">
+            <span>悬停暂停</span>
+            <svg class="ring" viewBox="0 0 22 22">
+              <circle class="bgc" cx="11" cy="11" r="9"></circle>
+              <circle class="fgc" id="ring-fg" cx="11" cy="11" r="9"></circle>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- F2 模式 -->
+      <div id="view-f2" style="display:none">
+        <textarea id="f2-input" class="f2-input" rows="1" placeholder="输入内容，实时翻译…" spellcheck="false"></textarea>
+        <div class="live" id="f2-live" style="display:none">
+          <span class="lab">译文</span>
+          <div class="dst-line" id="f2-dst"></div>
+        </div>
+        <div class="kbd-hint">
+          <b><kbd>⏎</kbd> 以译文替换</b>
+          <b><kbd>Esc</kbd> 取消</b>
+          <b><kbd>⇧⏎</kbd> 换行</b>
+        </div>
+      </div>
+
+      <!-- 状态提示 -->
+      <div id="view-status" style="display:none">
+        <div class="status-line"><span class="spinner"></span><span id="status-text">正在读取选中文本…</span></div>
+      </div>
+    </div>
+    <script type="module" src="/src/popup.ts"></script>
+  </body>
+</html>
