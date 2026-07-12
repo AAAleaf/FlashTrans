@@ -838,6 +838,7 @@ fn default_settings() -> Value {
             "selectedModel": "",
             "ocrEnabled": true,
             "extraModels": [],
+            "hiddenModels": [],
             "modelMeta": {}
         },
         "hotkeys": {
@@ -852,6 +853,10 @@ fn default_settings() -> Value {
             "profiles": [
                 { "name": "default", "baseUrl": "", "apiKey": "", "model": "" }
             ]
+        },
+        "prompts": {
+            "selected": "",
+            "presets": []
         }
     })
 }
@@ -1488,6 +1493,9 @@ struct LocalTranslateRequest {
     target_name: String,
     #[serde(default)]
     ocr: bool,
+    /// 领域提示词（用户自定义翻译要求），仅 GGUF 大模型使用；NLLB/Opus 桥接忽略
+    #[serde(rename = "domainPrompt", default)]
+    domain_prompt: String,
 }
 
 #[tauri::command]
@@ -1496,10 +1504,12 @@ async fn local_translate(app: AppHandle, req: LocalTranslateRequest) -> Result<V
     let model = req.model;
     // 本地 GGUF：走 Rust 原生 llama-cpp-2，不再经 Python
     if backend == "qwen" {
-        let (m, text, src, tgt, name, ocr) =
-            (model, req.text, req.source_lang, req.target_lang, req.target_name, req.ocr);
+        let (m, text, src, tgt, name, ocr, domain) = (
+            model, req.text, req.source_lang, req.target_lang, req.target_name, req.ocr,
+            req.domain_prompt,
+        );
         return tauri::async_runtime::spawn_blocking(move || {
-            gguf::translate(&m, &text, &src, &tgt, &name, ocr).map(|t| json!({ "text": t }))
+            gguf::translate(&m, &text, &src, &tgt, &name, ocr, &domain).map(|t| json!({ "text": t }))
         })
         .await
         .map_err(|e| e.to_string())?;

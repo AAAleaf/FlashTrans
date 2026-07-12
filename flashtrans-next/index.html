@@ -56,6 +56,7 @@
       <!-- 底栏 -->
       <footer class="actionbar">
         <span class="hint">F1 划词 · F2 打字 · F4 对话 · F5 呼出 — 全局可用</span>
+        <div class="qs" id="qs-box"></div>
         <button class="btn primary cta" id="btn-translate">翻译 <kbd>⌃⏎</kbd></button>
       </footer>
     </div>
@@ -108,7 +109,7 @@
             <span id="models-dir-path"></span>
             <button class="btn small" id="models-open">打开默认文件夹</button>
           </div>
-          <div class="hk-note">两种方式任选：① 把模型放进上面的默认文件夹后点「刷新」；② 用上面的按钮直接从任意位置选择模型。点每个模型右侧的 ✎ 可自定义名称和备注。</div>
+          <div class="hk-note">两种方式任选：① 把模型放进上面的默认文件夹后点「刷新」；② 用上面的按钮直接从任意位置选择模型。点 ✎ 自定义名称和备注；点 🗑 从列表移除（只是不再显示，不会删除磁盘上的文件，可随时恢复）。</div>
         </div>
         <div class="card row-between" id="ocr-box">
           <span>OCR 纠错<small class="sub" id="ocr-hint">截图翻译时用大模型顺手改正识别错字</small></span>
@@ -118,8 +119,26 @@
           </div>
         </div>
 
+        <div class="sec-label">领域提示词（大模型 / API 翻译生效）</div>
+        <div class="card col">
+          <div id="prompt-list" class="model-list" style="margin: 0 0 2px"></div>
+          <div class="model-add">
+            <button class="btn small" id="prompt-add">＋ 新建提示词</button>
+          </div>
+          <div class="hk-note" id="prompt-note">给翻译附加领域要求（如「医学领域，术语按规范译法」），主界面右下角可随时切换。仅对 .gguf 大模型与在线 API 生效；NLLB / Opus-MT 是专用翻译模型，无法遵循提示词。</div>
+        </div>
+
         <div class="sec-label">翻译 API（OpenAI 兼容 · 自备 Key）</div>
         <div class="card col">
+          <div id="profile-list" class="model-list" style="margin: 0 0 2px"></div>
+          <div class="model-add">
+            <button class="btn small" id="profile-add">＋ 新建预设</button>
+          </div>
+          <div class="hk-note">可保存多套 API（DeepSeek / Kimi / 本地 Ollama…），点击切换生效，主界面右下角也可快速切换；点 🗑 删除预设。</div>
+        </div>
+        <div class="card col">
+          <label class="f-label">预设名称</label>
+          <input class="f-input" id="api-name" placeholder="给这套配置起个名，如 DeepSeek" spellcheck="false" />
           <label class="f-label">Base URL</label>
           <input class="f-input" id="api-base" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
           <label class="f-label">Model</label>

@@ -172,6 +172,10 @@ textarea, input, [contenteditable] { user-select: text; -webkit-user-select: tex
 .dd-item .check { width: 14px; flex: 0 0 auto; font-size: 12px; color: var(--accent); }
 .dd-item:hover .check { color: #fff; }
 
+/* 向上展开的下拉（底栏用，避免菜单超出窗口底部） */
+.dd.up .dd-menu { top: auto; bottom: calc(100% + 6px); transform-origin: bottom center; }
+.dd.up:not(.open) .dd-menu { transform: translateX(-50%) translateY(6px) scale(0.96); }
+
 /* 可搜索下拉（语言选择） */
 .dd-search .dd-menu { min-width: 244px; }
 /* 固定的搜索头：与菜单同底色，让列表在其下滚动，四角随菜单裁圆 */
@@ -233,6 +237,8 @@ textarea, input, [contenteditable] { user-select: text; -webkit-user-select: tex
 }
 .f-input:focus { border-color: var(--accent); }
 .f-input::placeholder { color: var(--text-3); }
+/* 多行输入（领域提示词编辑） */
+textarea.f-input.f-area { min-height: 68px; resize: vertical; line-height: 1.55; font-family: inherit; }
 
 /* ── 提示吐司 ── */
 .toast {

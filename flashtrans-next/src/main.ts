@@ -6,8 +6,9 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   loadSettings, saveSettings, activeProfile, applyTheme, applyScale, onSettingsChanged,
   LANGS_FULL, resolveTarget, llmStream, translateMessages,
-  makeSearchDropdown, toast, ICONS, mountWinControls, el, comboFromEvent,
+  makeSearchDropdown, makeDropdown, toast, ICONS, mountWinControls, el, comboFromEvent,
   collectModels, probeModel, localTranslate, localReady,
+  ensurePrompts, activeDomainPrompt,
   type Settings, type ModelInfo, type SearchItem,
 } from "./shared";
 
@@ -148,10 +149,9 @@ async function main() {
   });
 
   function fillSheet() {
-    const p = activeProfile(settings);
-    $<HTMLInputElement>("api-base").value = p.baseUrl;
-    $<HTMLInputElement>("api-model").value = p.model;
-    $<HTMLInputElement>("api-key").value = p.apiKey;
+    fillApiEditor();
+    renderProfiles();
+    renderPrompts();
     segSet("seg-theme", settings.theme);
     segSet("seg-stay", String(settings.popupStaySecs));
     segSet("seg-clickout", settings.closeOnBlur ? "1" : "0");
@@ -170,6 +170,17 @@ async function main() {
     segSet("seg-engine", isApi ? "api" : "local");
     $("local-box").style.display = isApi ? "none" : "";
     renderOcrToggle();
+    renderPromptNote();
+    renderQuick();
+  }
+
+  // 领域提示词与 OCR 纠错同理：只有大模型（qwen）与 API 能遵循；NLLB/Opus 忽略。
+  // 不锁编辑（允许先配好再切引擎），只动态说明当前是否生效。
+  function renderPromptNote() {
+    const supported = settings.local.mode === "qwen" || settings.local.mode === "api";
+    $("prompt-note").textContent = supported
+      ? "给翻译附加领域要求（如「医学领域，术语按规范译法」），主界面右下角可随时切换预设。"
+      : "当前引擎（NLLB / Opus-MT）是专用翻译模型，无法遵循提示词；切到 .gguf 大模型或在线 API 才生效。这里仍可先编辑保存备用。";
   }
 
   // OCR 纠错靠往 LLM 的 prompt 里加提示实现，只有大模型（qwen）与 API 生效；
@@ -182,10 +193,29 @@ async function main() {
       : "当前引擎（NLLB / Opus-MT）不支持纠错，切到大模型或 API 才生效";
   }
 
+  // 列表底部的「恢复显示」入口：有被移除隐藏的模型时出现，防止误删找不回
+  function appendRestoreRow() {
+    const hidden = settings.local.hiddenModels ?? [];
+    if (!hidden.length) return;
+    const row = el("div", "model-restore");
+    const btn = el("button", "btn small", `恢复显示已移除的 ${hidden.length} 个模型`);
+    btn.addEventListener("click", async () => {
+      settings.local.hiddenModels = [];
+      await saveSettings(settings);
+      await refreshModels();
+      renderEngineSeg();
+      refreshBadge();
+      toast("已恢复显示");
+    });
+    row.appendChild(btn);
+    modelList.appendChild(row);
+  }
+
   function renderModels() {
     modelList.innerHTML = "";
     if (!models.length) {
       modelList.appendChild(el("div", "model-empty", "未发现模型。把模型放进默认文件夹后点「刷新」，或用下面的按钮直接选择。"));
+      appendRestoreRow();
       return;
     }
     for (const m of models) {
@@ -212,7 +242,30 @@ async function main() {
       editRow.appendChild(saveMetaBtn);
       editBox.append(nameIn, noteIn, editRow);
 
-      item.append(el("div", "mi-radio"), info, kind, editBtn, editBox);
+      item.append(el("div", "mi-radio"), info, kind, editBtn);
+
+      // 每个模型都可从列表移除，一律不动磁盘文件：
+      // 手动添加的 → 从 extraModels 去掉；默认文件夹扫描的 → 记入 hiddenModels（否则刷新又扫回来）
+      const rmBtn = el("button", "mi-edit");
+      rmBtn.title = "从列表移除（不删除磁盘文件）";
+      rmBtn.innerHTML = ICONS.trash;
+      rmBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if ((settings.local.extraModels ?? []).includes(m.path)) {
+          settings.local.extraModels = (settings.local.extraModels ?? []).filter((x) => x !== m.path);
+        } else {
+          settings.local.hiddenModels = [...(settings.local.hiddenModels ?? []), m.path];
+        }
+        if (settings.local.modelMeta) delete settings.local.modelMeta[m.path];
+        if (settings.local.selectedModel === m.path) settings.local.selectedModel = "";
+        await saveSettings(settings);
+        await refreshModels();
+        renderEngineSeg();
+        refreshBadge();
+        toast("已从列表移除（磁盘文件未删除）");
+      });
+      item.appendChild(rmBtn);
+      item.appendChild(editBox);
 
       editBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -244,6 +297,7 @@ async function main() {
       }
       modelList.appendChild(item);
     }
+    appendRestoreRow();
   }
 
   async function refreshModels() {
@@ -437,22 +491,111 @@ async function main() {
     });
   });
 
-  // ── API 配置 ──
-  async function collectProfile() {
-    const p = activeProfile(settings);
+  // ── API 多预设 ──
+
+  /** 当前选中的预设（保证一定存在且在列表内；列表空时兜底一条空白 default） */
+  function currentProfile() {
+    let p = settings.api.profiles.find((x) => x.name === settings.api.selected);
+    if (!p) p = settings.api.profiles[0];
+    if (!p) {
+      p = { name: "default", baseUrl: "", apiKey: "", model: "" };
+      settings.api.profiles.push(p);
+    }
+    settings.api.selected = p.name;
+    return p;
+  }
+
+  function fillApiEditor() {
+    const p = currentProfile();
+    $<HTMLInputElement>("api-name").value = p.name;
+    $<HTMLInputElement>("api-base").value = p.baseUrl;
+    $<HTMLInputElement>("api-model").value = p.model;
+    $<HTMLInputElement>("api-key").value = p.apiKey;
+  }
+
+  function renderProfiles() {
+    const list = $("profile-list");
+    list.innerHTML = "";
+    const cur = currentProfile();
+    for (const p of settings.api.profiles) {
+      const item = el("div", "model-item" + (p.name === cur.name ? " sel" : ""));
+      const info = el("div", "mi-info");
+      info.append(el("div", "mi-name", p.name), el("div", "mi-detail", p.model || "未填写模型"));
+
+      const rmBtn = el("button", "mi-edit");
+      rmBtn.title = "删除此预设";
+      rmBtn.innerHTML = ICONS.trash;
+      rmBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        settings.api.profiles = settings.api.profiles.filter((x) => x.name !== p.name);
+        if (settings.api.selected === p.name) {
+          settings.api.selected = settings.api.profiles[0]?.name ?? "";
+        }
+        currentProfile(); // 删空时兜底
+        await saveSettings(settings);
+        renderProfiles();
+        fillApiEditor();
+        refreshBadge();
+        renderQuick();
+        toast(`已删除预设 ${p.name}`);
+      });
+
+      item.append(el("div", "mi-radio"), info, rmBtn);
+      item.addEventListener("click", async () => {
+        if (settings.api.selected === p.name) return;
+        settings.api.selected = p.name;
+        await saveSettings(settings);
+        renderProfiles();
+        fillApiEditor();
+        refreshBadge();
+        renderQuick();
+        toast(`已切换到 ${p.name}`);
+      });
+      list.appendChild(item);
+    }
+  }
+
+  $("profile-add").addEventListener("click", async () => {
+    let n = 1;
+    while (settings.api.profiles.some((x) => x.name === `预设 ${n}`)) n++;
+    const p = { name: `预设 ${n}`, baseUrl: "", apiKey: "", model: "" };
+    settings.api.profiles.push(p);
+    settings.api.selected = p.name;
+    await saveSettings(settings);
+    renderProfiles();
+    fillApiEditor();
+    refreshBadge();
+    renderQuick();
+    const nameIn = $<HTMLInputElement>("api-name");
+    nameIn.focus();
+    nameIn.select();
+  });
+
+  /** 把编辑区内容写回当前预设（含重命名与重名检查）；成功返回 true */
+  async function collectProfile(): Promise<boolean> {
+    const p = currentProfile();
+    const name = $<HTMLInputElement>("api-name").value.trim() || p.name;
+    if (settings.api.profiles.some((x) => x !== p && x.name === name)) {
+      toast(`已有同名预设「${name}」`, false);
+      return false;
+    }
+    p.name = name;
+    settings.api.selected = name;
     p.baseUrl = $<HTMLInputElement>("api-base").value.trim();
     p.model = $<HTMLInputElement>("api-model").value.trim();
     p.apiKey = $<HTMLInputElement>("api-key").value.trim();
     await saveSettings(settings);
+    renderProfiles();
     refreshBadge();
+    renderQuick();
+    return true;
   }
   $("api-save").addEventListener("click", async () => {
-    await collectProfile();
-    toast("API 配置已保存");
+    if (await collectProfile()) toast("API 预设已保存");
   });
   $("api-test").addEventListener("click", async () => {
-    await collectProfile();
-    const p = activeProfile(settings);
+    if (!(await collectProfile())) return;
+    const p = currentProfile();
     if (!p.baseUrl || !p.model) {
       toast("请先填写 Base URL 和 Model", false);
       return;
@@ -466,6 +609,166 @@ async function main() {
     }, 0);
   });
 
+  // ── 领域提示词预设 ──
+  let promptEditing = ""; // 保持展开编辑状态的预设名（跨重渲染）
+
+  function renderPrompts() {
+    const pr = ensurePrompts(settings);
+    const list = $("prompt-list");
+    list.innerHTML = "";
+
+    // 固定首行：通用翻译（无附加要求），不可编辑/删除
+    const plain = el("div", "model-item" + (pr.selected ? "" : " sel"));
+    const plainInfo = el("div", "mi-info");
+    plainInfo.append(el("div", "mi-name", "通用翻译"), el("div", "mi-detail", "不附加领域要求"));
+    plain.append(el("div", "mi-radio"), plainInfo);
+    plain.addEventListener("click", async () => {
+      const pr2 = ensurePrompts(settings);
+      if (!pr2.selected) return;
+      pr2.selected = "";
+      await saveSettings(settings);
+      renderPrompts();
+      renderQuick();
+      toast("已切换到通用翻译");
+    });
+    list.appendChild(plain);
+
+    for (const p of pr.presets) {
+      const item = el("div", "model-item" + (pr.selected === p.name ? " sel" : ""));
+      const info = el("div", "mi-info");
+      const preview = p.text.trim()
+        ? (p.text.length > 42 ? p.text.slice(0, 42) + "…" : p.text)
+        : "（空提示词，点 ✎ 填写要求）";
+      info.append(el("div", "mi-name", p.name), el("div", "mi-detail", preview));
+
+      const editBtn = el("button", "mi-edit");
+      editBtn.title = "编辑名称 / 提示词";
+      editBtn.innerHTML = ICONS.edit;
+      const rmBtn = el("button", "mi-edit");
+      rmBtn.title = "删除此提示词";
+      rmBtn.innerHTML = ICONS.trash;
+
+      // 内联编辑区
+      const editBox = el("div", "mi-edit-box");
+      const nameIn = el("input", "f-input") as HTMLInputElement;
+      nameIn.placeholder = "预设名（如 医学 / 法律 / 游戏）";
+      nameIn.value = p.name;
+      const textIn = el("textarea", "f-input f-area") as HTMLTextAreaElement;
+      textIn.placeholder = "翻译要求，如：医学领域文本，术语按规范译法，保持正式语气。";
+      textIn.value = p.text;
+      textIn.spellcheck = false;
+      const editRow = el("div", "row-end");
+      const saveBtn = el("button", "btn small tint", "保存");
+      editRow.appendChild(saveBtn);
+      editBox.append(nameIn, textIn, editRow);
+      if (promptEditing === p.name) item.classList.add("editing");
+
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const on = item.classList.toggle("editing");
+        promptEditing = on ? p.name : "";
+      });
+      [nameIn, textIn].forEach((inp) => inp.addEventListener("click", (e) => e.stopPropagation()));
+
+      saveBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const pr2 = ensurePrompts(settings);
+        const tgt = pr2.presets.find((x) => x.name === p.name);
+        if (!tgt) return;
+        const newName = nameIn.value.trim() || tgt.name;
+        if (pr2.presets.some((x) => x !== tgt && x.name === newName)) {
+          toast(`已有同名提示词「${newName}」`, false);
+          return;
+        }
+        if (pr2.selected === tgt.name) pr2.selected = newName;
+        tgt.name = newName;
+        tgt.text = textIn.value.trim();
+        promptEditing = "";
+        await saveSettings(settings);
+        renderPrompts();
+        renderQuick();
+        toast("已保存提示词");
+      });
+
+      rmBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const pr2 = ensurePrompts(settings);
+        pr2.presets = pr2.presets.filter((x) => x.name !== p.name);
+        if (pr2.selected === p.name) pr2.selected = "";
+        if (promptEditing === p.name) promptEditing = "";
+        await saveSettings(settings);
+        renderPrompts();
+        renderQuick();
+        toast(`已删除提示词 ${p.name}`);
+      });
+
+      item.addEventListener("click", async () => {
+        const pr2 = ensurePrompts(settings);
+        if (pr2.selected === p.name) return;
+        pr2.selected = p.name;
+        await saveSettings(settings);
+        renderPrompts();
+        renderQuick();
+        toast(`领域提示词：${p.name}`);
+      });
+
+      item.append(el("div", "mi-radio"), info, editBtn, rmBtn, editBox);
+      list.appendChild(item);
+    }
+  }
+
+  $("prompt-add").addEventListener("click", async () => {
+    const pr = ensurePrompts(settings);
+    let n = 1;
+    while (pr.presets.some((x) => x.name === `领域 ${n}`)) n++;
+    const p = { name: `领域 ${n}`, text: "" };
+    pr.presets.push(p);
+    pr.selected = p.name;
+    promptEditing = p.name; // 新建后直接展开编辑
+    await saveSettings(settings);
+    renderPrompts();
+    renderQuick();
+  });
+
+  // ── 底栏快速切换（领域提示词 / API 预设）──
+  function renderQuick() {
+    const box = $("qs-box");
+    box.innerHTML = "";
+    const pr = ensurePrompts(settings);
+    const llmCapable = settings.local.mode === "qwen" || settings.local.mode === "api";
+
+    if (llmCapable && pr.presets.length > 0) {
+      const items: [string, string][] = [
+        ["", "通用翻译"],
+        ...pr.presets.map((p) => [p.name, p.name] as [string, string]),
+      ];
+      const cur = items.some(([v]) => v === pr.selected) ? pr.selected : "";
+      const dd = makeDropdown(items, cur, async (v) => {
+        ensurePrompts(settings).selected = v;
+        await saveSettings(settings);
+        toast(v ? `领域提示词：${v}` : "通用翻译（无附加要求）");
+      });
+      dd.root.classList.add("up");
+      const wrap = el("div", "qs-item");
+      wrap.append(el("span", "qs-label", "领域"), dd.root);
+      box.appendChild(wrap);
+    }
+
+    if (settings.local.mode === "api" && settings.api.profiles.length > 1) {
+      const items: [string, string][] = settings.api.profiles.map((p) => [p.name, p.name]);
+      const dd = makeDropdown(items, settings.api.selected, async (v) => {
+        settings.api.selected = v;
+        await saveSettings(settings);
+        refreshBadge();
+        toast(`API 预设：${v}`);
+      });
+      dd.root.classList.add("up");
+      const wrap = el("div", "qs-item");
+      wrap.append(el("span", "qs-label", "预设"), dd.root);
+      box.appendChild(wrap);
+    }
+  }
+
   // ── 其他窗口 ──
   $("btn-chat").addEventListener("click", async () => {
     const chat = await WebviewWindow.getByLabel("chat");
@@ -478,10 +781,12 @@ async function main() {
     applyTheme(s.theme);
     applyScale(s.uiScale);
     refreshBadge();
+    renderQuick();
   });
 
   // 启动时预扫一次，让徽章/设置页状态就绪
   refreshModels();
+  renderQuick();
 }
 
 /* ───────── 翻译 ───────── */
@@ -545,7 +850,7 @@ async function translate() {
   const caret = document.createElement("span");
   caret.className = "stream-caret";
 
-  await llmStream(p, translateMessages(text, target), {
+  await llmStream(p, translateMessages(text, target, false, activeDomainPrompt(settings)), {
     onDelta: (t) => {
       if (!started) {
         started = true;

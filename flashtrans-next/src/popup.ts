@@ -4,7 +4,7 @@ import { listen, emitTo } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
-  loadSettings, activeProfile, applyTheme, applyScale, onSettingsChanged,
+  loadSettings, activeProfile, activeDomainPrompt, applyTheme, applyScale, onSettingsChanged,
   resolveTarget, llmStream, translateMessages, localTranslate, localReady,
   ocrCorrectAvailable, ocrCorrectMessages, localCorrectOcr,
   type Settings,
@@ -238,7 +238,7 @@ async function f1GotText(text: string, title = "划词翻译", ocr = false) {
   dst.appendChild(caret);
   const target = resolveTarget(text, settings.sourceLang, settings.targetLang);
 
-  await llmStream(p, translateMessages(text, target, transOcr), {
+  await llmStream(p, translateMessages(text, target, transOcr, activeDomainPrompt(settings)), {
     onDelta: (t) => {
       caret.insertAdjacentText("beforebegin", t);
       fitHeight();
@@ -370,7 +370,7 @@ async function f2Translate(commitAfter = false) {
   }
 
   const target = resolveTarget(text, settings.sourceLang, settings.targetLang);
-  await llmStream(p, translateMessages(text, target), {
+  await llmStream(p, translateMessages(text, target, false, activeDomainPrompt(settings)), {
     onDelta: (t) => {
       caret.insertAdjacentText("beforebegin", t);
       fitHeight();

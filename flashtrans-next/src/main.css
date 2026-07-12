@@ -40,7 +40,12 @@
 
 .actionbar { display: flex; align-items: center; padding: 14px 20px 16px; gap: 12px; flex: 0 0 auto; }
 .hint { font-size: 12px; color: var(--text-3); letter-spacing: 0.2px; }
-.cta { margin-left: auto; font-size: 14.5px; padding: 10px 30px; border-radius: 22px; display: flex; align-items: center; gap: 8px; }
+/* 底栏快速切换（领域提示词 / API 预设），空时不占位，CTA 靠它推到右侧 */
+.qs { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.qs-item { display: flex; align-items: center; gap: 6px; }
+.qs-label { font-size: 11.5px; color: var(--text-3); }
+.qs .dd-btn { min-width: 0; padding: 6px 14px; font-size: 12.5px; }
+.cta { font-size: 14.5px; padding: 10px 30px; border-radius: 22px; display: flex; align-items: center; gap: 8px; }
 .cta kbd {
   font: inherit; font-size: 11px; font-weight: 500; opacity: 0.8;
   border: 1px solid rgba(255, 255, 255, 0.35); padding: 0 6px; border-radius: 6px;
@@ -122,6 +127,7 @@
 }
 .model-item.editing { flex-wrap: wrap; }
 .model-item.editing .mi-edit-box { display: flex; }
+.model-restore { display: flex; justify-content: center; padding: 2px 0; }
 .models-dir { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); margin-top: 8px; }
 .models-dir span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; direction: rtl; text-align: left; }
 

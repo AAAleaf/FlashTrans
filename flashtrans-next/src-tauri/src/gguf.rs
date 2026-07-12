@@ -228,7 +228,8 @@ fn generate(model: &LlamaModel, prompt: &str, max_tokens: usize, temp: f32) -> R
     Ok(strip_think(&out))
 }
 
-/// 本地 GGUF 翻译。ocr=true 时启用 OCR 纠错（识别文本可能有错字，先纠正再翻译）
+/// 本地 GGUF 翻译。ocr=true 时启用 OCR 纠错（识别文本可能有错字，先纠正再翻译）；
+/// domain 非空时把用户的领域提示词（术语/风格要求）附加进 system。
 pub fn translate(
     model_path: &str,
     text: &str,
@@ -236,6 +237,7 @@ pub fn translate(
     target_lang: &str,
     target_name: &str,
     ocr: bool,
+    domain: &str,
 ) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -251,6 +253,10 @@ pub fn translate(
             " The text was extracted via OCR and may contain minor recognition errors; \
              silently correct obvious errors from context before translating.",
         );
+    }
+    if !domain.trim().is_empty() {
+        system.push_str(" Follow these additional requirements from the user (domain, terminology, style): ");
+        system.push_str(domain.trim());
     }
     let prompt = chatml(&system, text, true); // 关闭思考，直接出译文
     run(model_path, &prompt, 640, 0.1)

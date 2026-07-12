@@ -14,7 +14,14 @@ export interface LocalSettings {
   selectedModel: string;
   ocrEnabled: boolean;
   extraModels?: string[];
+  /** 默认文件夹扫描到但被用户从列表移除的模型（只隐藏显示，不动磁盘文件） */
+  hiddenModels?: string[];
   modelMeta?: Record<string, { name?: string; note?: string }>;
+}
+
+export interface PromptPreset {
+  name: string;
+  text: string;
 }
 
 export interface Settings {
@@ -27,6 +34,22 @@ export interface Settings {
   local: LocalSettings;
   hotkeys: Record<string, string>;
   api: { selected: string; profiles: ApiProfile[] };
+  prompts?: { selected: string; presets: PromptPreset[] };
+}
+
+/** 领域提示词预设容器（旧配置无此字段时就地补全） */
+export function ensurePrompts(s: Settings): { selected: string; presets: PromptPreset[] } {
+  if (!s.prompts) s.prompts = { selected: "", presets: [] };
+  if (!Array.isArray(s.prompts.presets)) s.prompts.presets = [];
+  return s.prompts;
+}
+
+/** 当前生效的领域提示词文本；未选或引擎不适用时由调用方决定是否传入 */
+export function activeDomainPrompt(s: Settings): string {
+  const pr = s.prompts;
+  if (!pr?.selected) return "";
+  const p = pr.presets?.find((x) => x.name === pr.selected);
+  return (p?.text ?? "").trim();
 }
 
 /** 把键盘事件转成全局热键组合串（如 "Ctrl+Shift+A" / "F2"）；不合法返回 null */
@@ -97,11 +120,14 @@ export async function probeModel(path: string): Promise<ModelInfo | null> {
   return (await invoke("model_probe", { path })) as ModelInfo | null;
 }
 
-/** 合并默认文件夹扫描结果 + 用户手动添加的模型（extraModels），并套用自定义名称/备注 */
+/** 合并默认文件夹扫描结果 + 用户手动添加的模型（extraModels），过滤被移除隐藏的，并套用自定义名称/备注 */
 export async function collectModels(settings: Settings): Promise<{ root: string; models: ModelInfo[] }> {
   const st = await scanModels(settings.local.modelsDir);
+  const hidden = new Set(settings.local.hiddenModels ?? []);
   const map = new Map<string, ModelInfo>();
-  for (const m of st.models) map.set(m.path, m);
+  for (const m of st.models) {
+    if (!hidden.has(m.path)) map.set(m.path, m);
+  }
 
   const extras = settings.local.extraModels ?? [];
   for (const path of extras) {
@@ -154,6 +180,8 @@ export async function localTranslate(settings: Settings, text: string, ocr = fal
       // 目标语言英文名（喂给本地 GGUF 提示词，比 FLORES 码可靠）；auto 时留空由后端解析
       targetName: settings.targetLang !== "auto" ? langEnglish(settings.targetLang) : "",
       ocr,
+      // 领域提示词仅 GGUF 大模型使用；NLLB/Opus 桥接忽略
+      domainPrompt: activeDomainPrompt(settings),
     },
   })) as { text?: string };
   return (res.text ?? "").trim();
@@ -486,7 +514,7 @@ export function cancelStreamUi() {
   active = null;
 }
 
-export function translateMessages(text: string, targetLang: string, ocr = false) {
+export function translateMessages(text: string, targetLang: string, ocr = false, domain = "") {
   const langName = langEnglish(targetLang);
   let content =
     `You are a professional translator. Translate the user's text into ${langName}. ` +
@@ -495,6 +523,9 @@ export function translateMessages(text: string, targetLang: string, ocr = false)
     content +=
       " The text was extracted via OCR and may contain minor recognition errors; " +
       "silently correct obvious errors from context before translating.";
+  }
+  if (domain.trim()) {
+    content += ` Follow these additional requirements from the user (domain, terminology, style): ${domain.trim()}`;
   }
   content += " /no_think";
   return [
