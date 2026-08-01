@@ -1,5 +1,6 @@
 /* ── 对话窗口 ── */
-#app { display: flex; flex-direction: column; height: 100vh; }
+/* 高度要按界面缩放倍率换算：CSS zoom 不改 vh 的取值，直接写 100vh 在放大后会溢出窗口 */
+#app { display: flex; flex-direction: column; height: calc(100vh * var(--vh-scale, 1)); }
 
 .msgs { flex: 1; overflow-y: auto; padding: 8px 20px 16px; display: flex; flex-direction: column; gap: 14px; }
 

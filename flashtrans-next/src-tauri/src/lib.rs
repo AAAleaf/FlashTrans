@@ -612,8 +612,13 @@ mod ocr {
         }
     }
 
-    /// 识别一张 RGBA8 图（每像素 R,G,B,A），返回按行拼接的文本
-    pub fn recognize_rgba(width: u32, height: u32, rgba: &[u8], source_lang: &str) -> Result<String, String> {
+    /// 识别一张 RGBA8 图（每像素 R,G,B,A），返回逐行文本 + 行框（原图像素坐标）
+    pub fn recognize_rgba(
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        source_lang: &str,
+    ) -> Result<Vec<crate::OcrLine>, String> {
         recognize_with(width, height, rgba, source_lang, PreprocOpts::default())
     }
 
@@ -623,7 +628,7 @@ mod ocr {
         rgba: &[u8],
         source_lang: &str,
         opts: PreprocOpts,
-    ) -> Result<String, String> {
+    ) -> Result<Vec<crate::OcrLine>, String> {
         if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
             return Err("截图数据无效".into());
         }
@@ -661,6 +666,9 @@ mod ocr {
         let mut factor = f_long.max(f_short).min(opts.max_factor);
         if long * factor > 9000.0 {
             factor = 9000.0 / long; // Windows OCR 位图上限 10000px，留白前先封顶
+        }
+        if factor <= 1.01 {
+            factor = 1.0; // 不放大时归一，行框反算才是精确的
         }
         let up = if factor > 1.01 {
             let nw = (((width as f32) * factor).round() as u32).max(1);
@@ -726,16 +734,38 @@ mod ocr {
             .map_err(|e| e.to_string())?;
 
         let lines = result.Lines().map_err(|e| e.to_string())?;
-        let mut out: Vec<String> = Vec::new();
+        let mut out: Vec<crate::OcrLine> = Vec::new();
         for line in lines {
             let raw = line.Text().map(|s| s.to_string()).unwrap_or_default();
             let t = collapse_cjk_spaces(&raw);
             let t = t.trim().to_string();
-            if !t.is_empty() {
-                out.push(t);
+            if t.is_empty() {
+                continue;
             }
+            // 行框 = 该行所有词框的并集，再按预处理的放大倍率/留白反算回原图坐标，
+            // 让「原位覆盖」能把译文贴回文字原来的位置
+            let (mut l, mut t_, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            if let Ok(words) = line.Words() {
+                for word in words {
+                    if let Ok(rect) = word.BoundingRect() {
+                        l = l.min(rect.X);
+                        t_ = t_.min(rect.Y);
+                        r = r.max(rect.X + rect.Width);
+                        b = b.max(rect.Y + rect.Height);
+                    }
+                }
+            }
+            let bbox = if l <= r && t_ <= b {
+                let p = pad as f32;
+                let unmap = |v: f32| (v - p) / factor;
+                Some((unmap(l), unmap(t_), (r - l) / factor, (b - t_) / factor))
+            } else {
+                None
+            };
+            let (x, y, w, h) = bbox.unwrap_or((0.0, 0.0, 0.0, 0.0));
+            out.push(crate::OcrLine { text: t, x, y, w, h });
         }
-        Ok(out.join("\n"))
+        Ok(out)
     }
 }
 
@@ -777,6 +807,7 @@ mod ocr_ab_tests {
             println!("── {} ({w}x{h}) lang={lang}", p.file_name().unwrap().to_string_lossy());
             for (label, opts) in variants {
                 let out = ocr::recognize_with(w, h, &raw, &lang, opts)
+                    .map(|lines| lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n"))
                     .unwrap_or_else(|e| format!("<err: {e}>"));
                 println!("  [{label}] {}", out.replace('\n', " ⏎ "));
             }
@@ -815,7 +846,9 @@ struct AppState {
     target_hwnd: Mutex<isize>,
     bridge: Mutex<Option<BridgeSession>>,
     snip_full: Mutex<Option<String>>, // F3 全屏截图 data URL，供 snip overlay 拉取
+    snip_origin: Mutex<(i32, i32)>,   // 该截图对应的虚拟桌面原点，用于把框选换算回屏幕坐标
     pin_img: Mutex<Option<String>>,   // 贴图窗口要显示的图片 data URL
+    overlay: Mutex<Option<Value>>,    // 原位覆盖窗口要显示的数据（截图 + 分块）
 }
 
 fn settings_file(app: &AppHandle) -> PathBuf {
@@ -832,14 +865,25 @@ fn default_settings() -> Value {
         "uiScale": 1.0,
         "sourceLang": "auto",
         "targetLang": "zh",
+        // 双向自动切换：识别到的语言正好是目标语言时，改译回源语言（中↔英一键往返）
+        "autoSwap": false,
+        // 截图翻译把译文原位覆盖在框选区域上（另开置顶窗口），弹窗仍照常出现
+        "snipOverlay": false,
         "local": {
             "mode": "nllb",
             "modelsDir": "",
             "selectedModel": "",
+            // F4 对话 / OCR 纠错专用的 GGUF；留空则沿用翻译模型（仅 GGUF 时可用）
+            "assistantModel": "",
             "ocrEnabled": true,
             "extraModels": [],
             "hiddenModels": [],
             "modelMeta": {}
+        },
+        // 自定义 OCR：RapidOCR 格式的 ONNX 识别模型（PP-OCR det/rec），用于系统缺语言包的语种
+        "ocr": {
+            "selected": "",
+            "profiles": []
         },
         "hotkeys": {
             "f1": "F1",
@@ -879,7 +923,10 @@ fn merge_value(base: &mut Value, saved: &Value) {
 fn read_settings_value(app: &AppHandle) -> Value {
     let mut merged = default_settings();
     if let Ok(raw) = std::fs::read_to_string(settings_file(app)) {
-        if let Ok(saved) = serde_json::from_str::<Value>(&raw) {
+        // 记事本 / PowerShell 存出来的 UTF-8 会带 BOM，serde 会直接解析失败，
+        // 结果是"所有设置无声地退回默认值"——先剥掉再解析
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+        if let Ok(saved) = serde_json::from_str::<Value>(raw) {
             merge_value(&mut merged, &saved);
         }
     }
@@ -1433,8 +1480,14 @@ fn bridge_request(state: &AppState, backend: &str, model: &str, mut payload: Val
 
 /// OCR 走 bridge：复用当前已有的 bridge 会话（不打断翻译模型），没有则起一个
 /// 轻量会话（backend=nllb, model 空 —— OCR 与翻译模型无关）。
-fn bridge_ocr(state: &AppState, image_b64: &str) -> Result<String, String> {
-    let payload = json!({ "op": "ocr_image", "imageB64": image_b64 });
+/// `custom` 非空时指定 RapidOCR 的自定义 ONNX 模型（det/rec/keys/cls），用于系统缺语言包的语种。
+fn bridge_ocr(state: &AppState, image_b64: &str, custom: &Value) -> Result<Vec<OcrLine>, String> {
+    let mut payload = json!({ "op": "ocr_image", "imageB64": image_b64 });
+    if let (Some(obj), Some(src)) = (payload.as_object_mut(), custom.as_object()) {
+        for (k, v) in src {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
     let mut guard = state.bridge.lock().unwrap();
     if guard.is_none() {
         *guard = Some(start_bridge("nllb", "")?);
@@ -1444,7 +1497,23 @@ fn bridge_ocr(state: &AppState, image_b64: &str) -> Result<String, String> {
     if res.is_err() && matches!(res, Err(ref e) if e.contains("没有返回结果")) {
         *guard = None;
     }
-    res.map(|v| v.get("source").and_then(Value::as_str).unwrap_or("").to_string())
+    res.map(|v| {
+        v.get("lines")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|it| {
+                        let text = it.get("text").and_then(Value::as_str)?.trim().to_string();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        let num = |k: &str| it.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                        Some(OcrLine { text, x: num("x"), y: num("y"), w: num("w"), h: num("h") })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
 }
 
 /// 是否 CJK（换行合并时 CJK 相接不加空格）
@@ -1458,26 +1527,97 @@ fn is_cjk_char(c: char) -> bool {
         || (0xFF00..=0xFFEF).contains(&u)
 }
 
-/// OCR 逐行结果 → 自然段落：段内换行（上一行不是以句末标点结尾）合并，
-/// CJK 相接不加空格、其余加空格；句末标点后保留换行。
-/// 屏幕上一段被 UI 折行成多行是常态，不合并会带来"莫名其妙的换行"且拖累翻译质量。
-fn normalize_ocr_lines(s: &str) -> String {
-    let mut out = String::new();
-    for line in s.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if out.is_empty() {
-            out.push_str(line);
-            continue;
-        }
-        let prev = out.chars().last().unwrap_or(' ');
-        let next = line.chars().next().unwrap_or(' ');
-        if matches!(prev, '。' | '！' | '？' | '!' | '?' | '；' | ';' | '：' | ':') {
-            out.push('\n');
-        } else if !(is_cjk_char(prev) || is_cjk_char(next)) {
-            out.push(' ');
-        }
+/// OCR 单行结果：文本 + 行框（原图像素坐标，w=0 表示引擎没给出坐标）
+#[derive(Serialize, Clone)]
+pub struct OcrLine {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// 一个自然段：合并后的文本 + 该段所有行框的并集，供「原位覆盖」定位译文
+#[derive(Serialize, Clone)]
+struct OcrBlock {
+    text: String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+fn ends_sentence(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '!' | '?' | '；' | ';' | '：' | ':')
+}
+
+/// 把一行接到段落文本后面：CJK 相接不加空格，其余加空格
+fn append_line(out: &mut String, line: &str) {
+    if out.is_empty() {
         out.push_str(line);
+        return;
     }
-    out
+    let prev = out.chars().last().unwrap_or(' ');
+    let next = line.chars().next().unwrap_or(' ');
+    if !(is_cjk_char(prev) || is_cjk_char(next)) {
+        out.push(' ');
+    }
+    out.push_str(line);
+}
+
+/// OCR 逐行结果 → 自然段落：段内换行（上一行不是以句末标点结尾）合并。
+/// 屏幕上一段被 UI 折行成多行是常态，不合并会带来"莫名其妙的换行"且拖累翻译质量。
+/// 有行框时再加两条几何规则：行间距明显变大、或左边界大幅错开（分栏）也断段。
+fn group_ocr_blocks(lines: Vec<OcrLine>) -> Vec<OcrBlock> {
+    let mut lines: Vec<OcrLine> = lines.into_iter().filter(|l| !l.text.trim().is_empty()).collect();
+    let has_boxes = lines.iter().any(|l| l.w > 0.0 && l.h > 0.0);
+    if has_boxes {
+        lines.sort_by(|a, b| {
+            a.y.partial_cmp(&b.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+        });
+    }
+
+    let mut blocks: Vec<OcrBlock> = Vec::new();
+    let mut prev: Option<OcrLine> = None;
+    for line in lines {
+        let text = line.text.trim().to_string();
+        let split = match (&prev, blocks.last()) {
+            (Some(p), Some(b)) => {
+                let punct = p.text.chars().last().map(ends_sentence).unwrap_or(false);
+                let geo = if has_boxes && p.h > 0.0 && line.h > 0.0 {
+                    let gap = line.y - (p.y + p.h);
+                    // 行距超过约一个行高 = 换段；左边界错开超过 2 个字高 = 换栏
+                    gap > p.h * 0.9 || (line.x - b.x).abs() > line.h * 2.0
+                } else {
+                    false
+                };
+                punct || geo
+            }
+            _ => true,
+        };
+
+        if split {
+            blocks.push(OcrBlock { text, x: line.x, y: line.y, w: line.w, h: line.h });
+        } else if let Some(b) = blocks.last_mut() {
+            append_line(&mut b.text, &text);
+            if has_boxes && line.w > 0.0 {
+                let (r, bottom) = ((b.x + b.w).max(line.x + line.w), (b.y + b.h).max(line.y + line.h));
+                b.x = b.x.min(line.x);
+                b.y = b.y.min(line.y);
+                b.w = r - b.x;
+                b.h = bottom - b.y;
+            }
+        }
+        prev = Some(line);
+    }
+    blocks
+}
+
+/// 段落文本还原成给翻译引擎/弹窗看的整段原文（段间保留换行）
+fn blocks_to_text(blocks: &[OcrBlock]) -> String {
+    blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n")
 }
 
 #[derive(Deserialize)]
@@ -1650,6 +1790,13 @@ fn ocr_popup_error(app: &AppHandle, msg: String) {
 /// F3：截取整个虚拟桌面（所有屏一张图）→ 打开覆盖全屏的自定义框选 overlay。
 /// 框选、裁剪、OCR 都在自定义窗口内完成，无系统截图工具的声音 / 落盘 / 弹窗。
 fn on_f3(app: &AppHandle) {
+    // 上一轮的原位覆盖窗口是置顶的，不先收起来会被一起截进新截图里
+    if let Some(w) = app.get_webview_window("overlay") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+            std::thread::sleep(Duration::from_millis(90)); // 等桌面重绘，否则截到残影
+        }
+    }
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(windows)]
@@ -1670,7 +1817,12 @@ fn on_f3(app: &AppHandle) {
             ocr_popup_error(&app2, "截屏编码失败".into());
             return;
         }
-        *app2.state::<AppState>().snip_full.lock().unwrap() = Some(data_url);
+        {
+            let state = app2.state::<AppState>();
+            *state.snip_full.lock().unwrap() = Some(data_url);
+            // 记住虚拟桌面原点：框选坐标是相对这张全屏图的，加上原点才是真实屏幕坐标
+            *state.snip_origin.lock().unwrap() = (vx, vy);
+        }
 
         if let Some(snip) = app2.get_webview_window("snip") {
             let _ = snip.set_position(PhysicalPosition::new(vx, vy));
@@ -1703,21 +1855,42 @@ struct NativeOcrRequest {
     image_b64: String,
     #[serde(rename = "sourceLang")]
     source_lang: String,
+    /// 自定义 OCR 模型（RapidOCR 格式的 ONNX）：{ detPath, recPath, keysPath, clsPath }。
+    /// 非空时强制走 bridge 的 RapidOCR，用它来识别系统没装语言包的语种（韩语/俄语…）。
+    #[serde(default)]
+    custom: Value,
 }
 
-/// 截图 OCR：中/英优先走 bridge 的 RapidOCR（中文特训模型，质量远超系统 OCR），
-/// bridge 不可用或其他语种回退 Windows 原生 OCR。
+/// 自定义 OCR 配置是否填了至少一个模型路径
+fn custom_ocr_active(v: &Value) -> bool {
+    ["recPath", "detPath"]
+        .iter()
+        .any(|k| v.get(k).and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false))
+}
+
+/// 截图 OCR：选了自定义 OCR 模型就走它；否则中/英优先走 bridge 的 RapidOCR
+/// （中文特训模型，质量远超系统 OCR），bridge 不可用或其他语种回退 Windows 原生 OCR。
+/// 返回整段原文 + 逐段文字框（供「原位覆盖」把译文贴回原处）。
 #[tauri::command]
 async fn native_ocr(app: AppHandle, req: NativeOcrRequest) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
-        // RapidOCR 的默认模型只覆盖中英；日韩俄等语种仍用系统对应语言引擎
-        let rapid_ok = matches!(req.source_lang.trim(), "" | "auto" | "zh" | "zh-Hant" | "en");
+        let custom = custom_ocr_active(&req.custom);
+        // RapidOCR 的默认模型只覆盖中英；日韩俄等语种没配自定义模型时仍用系统对应语言引擎
+        let rapid_ok = custom || matches!(req.source_lang.trim(), "" | "auto" | "zh" | "zh-Hant" | "en");
+        let mut custom_err = String::new();
         if rapid_ok {
             let state = app.state::<AppState>();
-            if let Ok(text) = bridge_ocr(state.inner(), &req.image_b64) {
-                if !text.trim().is_empty() {
-                    return Ok(json!({ "source": normalize_ocr_lines(&text) }));
+            match bridge_ocr(state.inner(), &req.image_b64, &req.custom) {
+                Ok(lines) if !lines.is_empty() => {
+                    let blocks = group_ocr_blocks(lines);
+                    return Ok(json!({ "source": blocks_to_text(&blocks), "blocks": blocks }));
                 }
+                Ok(_) => {}
+                // 自定义模型出错要说清楚，否则会静默回退到系统 OCR 让人以为"设置没生效"
+                Err(e) => custom_err = e,
+            }
+            if custom && !custom_err.is_empty() {
+                return Err(format!("自定义 OCR 模型识别失败：{custom_err}"));
             }
         }
         use base64::Engine as _;
@@ -1728,13 +1901,14 @@ async fn native_ocr(app: AppHandle, req: NativeOcrRequest) -> Result<Value, Stri
         let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?.to_rgba8();
         let (w, h) = img.dimensions();
         #[cfg(windows)]
-        let source = ocr::recognize_rgba(w, h, &img.into_raw(), &req.source_lang)?;
+        let lines = ocr::recognize_rgba(w, h, &img.into_raw(), &req.source_lang)?;
         #[cfg(not(windows))]
-        let source = {
+        let lines: Vec<OcrLine> = {
             let _ = (w, h);
-            String::new()
+            Vec::new()
         };
-        Ok(json!({ "source": normalize_ocr_lines(&source) }))
+        let blocks = group_ocr_blocks(lines);
+        Ok(json!({ "source": blocks_to_text(&blocks), "blocks": blocks }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1790,6 +1964,56 @@ fn pin_close(app: AppHandle) {
     }
 }
 
+#[derive(Deserialize)]
+struct OverlayRequest {
+    /// 框选区域的截图（data URL），作为覆盖层底图
+    img: String,
+    /// 段落框 + 原文（坐标是相对截图的物理像素），译文由 overlay 窗口自己算
+    blocks: Value,
+    /// 框选区域相对虚拟桌面截图的物理像素位置
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    /// 框选区域的逻辑（CSS）尺寸，转交弹窗用于「贴图置顶」
+    #[serde(rename = "cssW", default)]
+    css_w: f64,
+    #[serde(rename = "cssH", default)]
+    css_h: f64,
+}
+
+/// 原位覆盖：在框选区域正上方开一个同尺寸的置顶窗口，把译文盖在原文位置上。
+/// 用物理像素定位/定尺，避免高 DPI 下逻辑像素换算导致的错位。
+#[tauri::command]
+fn overlay_show(app: AppHandle, req: OverlayRequest) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let (vx, vy) = *state.snip_origin.lock().unwrap();
+    *state.overlay.lock().unwrap() = Some(json!({
+        "img": req.img, "blocks": req.blocks, "w": req.w, "h": req.h,
+        "cssW": req.css_w, "cssH": req.css_h,
+    }));
+    let win = app.get_webview_window("overlay").ok_or("overlay window missing")?;
+    let _ = win.set_size(tauri::PhysicalSize::new(req.w.max(40), req.h.max(30)));
+    let _ = win.set_position(PhysicalPosition::new(vx + req.x, vy + req.y));
+    let _ = win.show();
+    let _ = win.set_always_on_top(true);
+    let _ = win.set_focus();
+    let _ = app.emit_to("overlay", "overlay-open", json!({}));
+    Ok(())
+}
+
+#[tauri::command]
+fn overlay_data(state: tauri::State<'_, AppState>) -> Option<Value> {
+    state.overlay.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn overlay_close(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.hide();
+    }
+}
+
 /// 在系统文件管理器中打开文件夹（绕过 opener 插件的路径 scope 限制）
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
@@ -1830,22 +2054,41 @@ fn on_f5(app: &AppHandle) {
     }
 }
 
-/// 按设置里的组合键注册全局热键（设置保存时重新注册）
+/// 按设置里的组合键注册全局热键（设置保存时重新注册）。
+///
+/// 不能用 `unregister_all()` 打头：它在主线程上调用时会失败，而失败后插件内部的
+/// 已注册表并没有清空，紧接着的 register 就会被判成 "already registered" 而全部落空
+/// ——表现是保存一次设置之后 F1~F5 全部失灵。改成只动真正变化了的那几个键。
 fn apply_hotkeys(app: &AppHandle) {
+    static APPLIED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
     let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
     let s = read_settings_value(app);
     let empty = json!({});
     let hk = s.get("hotkeys").unwrap_or(&empty);
-    for (name, def) in [("f1", "F1"), ("f2", "F2"), ("f3", "F3"), ("f4", "F4"), ("f5", "F5")] {
-        let combo = hk.get(name).and_then(Value::as_str).unwrap_or(def).trim().to_string();
-        if combo.is_empty() {
+
+    let wanted: Vec<String> = [("f1", "F1"), ("f2", "F2"), ("f3", "F3"), ("f4", "F4"), ("f5", "F5")]
+        .iter()
+        .map(|(name, def)| hk.get(name).and_then(Value::as_str).unwrap_or(def).trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    let mut applied = APPLIED.lock().unwrap();
+    for old in applied.iter() {
+        if !wanted.contains(old) {
+            let _ = gs.unregister(old.as_str());
+        }
+    }
+    for combo in &wanted {
+        if gs.is_registered(combo.as_str()) {
             continue;
         }
         if let Err(e) = gs.register(combo.as_str()) {
-            eprintln!("hotkey {name}={combo} register failed: {e}");
+            // 常见原因：另一个 FlashTrans 实例或别的软件已经占住了这个组合键
+            eprintln!("hotkey {combo} register failed: {e}");
         }
     }
+    *applied = wanted;
 }
 
 fn dispatch_hotkey(app: &AppHandle, shortcut: &Shortcut) {
@@ -1868,15 +2111,115 @@ fn dispatch_hotkey(app: &AppHandle, shortcut: &Shortcut) {
     }
 }
 
+/// 是否以「静默启动」方式拉起（开机自启走这条路：只驻留托盘，不弹主窗口）
+fn silent_launch(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--silent" || a == "--tray")
+}
+
+/// 把主窗口叫到前台（托盘、第二次启动、F5 共用）
+fn present_main(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+}
+
+/// 开机自启：直接读写 HKCU\...\Run。自己写而不是用现成插件，是因为要保证
+/// exe 路径带引号（安装目录含空格时不加引号会启动失败/被劫持），
+/// 且值名和命令行要与安装包写的那条完全一致，避免留下两条重复启动项。
+#[cfg(windows)]
+mod autostart {
+    use std::path::PathBuf;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    /// 任务管理器「启动」页的开关状态；用户在那里禁用过就必须清掉，否则 Run 项形同虚设
+    const APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    const VALUE_NAME: &str = "FlashTrans";
+
+    fn command_line() -> Result<String, String> {
+        let exe: PathBuf = std::env::current_exe().map_err(|e| e.to_string())?;
+        Ok(format!("\"{}\" --silent", exe.display()))
+    }
+
+    /// 任务管理器里是否被禁用（首字节含 bit1 = disabled）
+    fn disabled_by_task_manager() -> bool {
+        RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(APPROVED_KEY, KEY_READ)
+            .ok()
+            .and_then(|k| k.get_raw_value(VALUE_NAME).ok())
+            .map(|v| v.bytes.first().map(|b| b & 1 != 0).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    pub fn is_enabled() -> bool {
+        let present = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags(RUN_KEY, KEY_READ)
+            .ok()
+            .and_then(|k| k.get_value::<String, _>(VALUE_NAME).ok())
+            .is_some();
+        present && !disabled_by_task_manager()
+    }
+
+    pub fn set(enabled: bool) -> Result<(), String> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if enabled {
+            let (key, _) = hkcu.create_subkey(RUN_KEY).map_err(|e| e.to_string())?;
+            key.set_value(VALUE_NAME, &command_line()?).map_err(|e| e.to_string())?;
+            // 清掉任务管理器的禁用标记，否则开关是开的但开机仍然不启动
+            if let Ok(approved) = hkcu.open_subkey_with_flags(APPROVED_KEY, KEY_SET_VALUE) {
+                let _ = approved.delete_value(VALUE_NAME);
+            }
+        } else if let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) {
+            match key.delete_value(VALUE_NAME) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn autostart_get() -> bool {
+    #[cfg(windows)]
+    return autostart::is_enabled();
+    #[cfg(not(windows))]
+    false
+}
+
+#[tauri::command]
+fn autostart_set(enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    return autostart::set(enabled);
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("当前平台不支持开机自启".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例必须最先注册：重复启动时把已有窗口叫出来，而不是再开一个
+        // （多开的进程注册不上全局热键，只会变成用不了的僵尸窗口）
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !silent_launch(&argv) {
+                present_main(app);
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             target_hwnd: Mutex::new(0),
             bridge: Mutex::new(None),
             snip_full: Mutex::new(None),
+            snip_origin: Mutex::new((0, 0)),
             pin_img: Mutex::new(None),
+            overlay: Mutex::new(None),
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -1911,13 +2254,24 @@ pub fn run() {
             pin_show,
             pin_data,
             pin_close,
+            overlay_show,
+            overlay_data,
+            overlay_close,
+            autostart_get,
+            autostart_set,
             open_folder
         ])
         .setup(|app| {
             apply_hotkeys(app.handle());
 
+            // 主窗口在配置里是 visible:false（避免开机自启时闪一下），
+            // 非静默启动时在这里显示出来
+            if !silent_launch(&std::env::args().collect::<Vec<_>>()) {
+                present_main(app.handle());
+            }
+
             #[cfg(windows)]
-            for label in ["main", "popup", "chat", "pin"] {
+            for label in ["main", "popup", "chat", "pin", "overlay"] {
                 if let Some(w) = app.get_webview_window(label) {
                     if let Ok(h) = w.hwnd() {
                         win32::round_corners(h.0 as isize);
@@ -1934,13 +2288,7 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(main) = app.get_webview_window("main") {
-                            let _ = main.show();
-                            let _ = main.unminimize();
-                            let _ = main.set_focus();
-                        }
-                    }
+                    "show" => present_main(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1951,12 +2299,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(main) = app.get_webview_window("main") {
-                            let _ = main.show();
-                            let _ = main.unminimize();
-                            let _ = main.set_focus();
-                        }
+                        present_main(tray.app_handle());
                     }
                 })
                 .build(app)?;

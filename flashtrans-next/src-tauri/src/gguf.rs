@@ -28,10 +28,15 @@ struct Loaded {
     model: LlamaModel,
 }
 
-/// 缓存当前已加载的模型（按路径），避免每次调用都重新载入
-fn model_slot() -> &'static Mutex<Option<Loaded>> {
-    static SLOT: OnceLock<Mutex<Option<Loaded>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
+/// 同时缓存的模型上限。为 2 是因为「翻译模型 + 助手模型（F4 对话 / OCR 纠错）」
+/// 允许各选一个 GGUF；只留 1 个槽会让两者互相顶掉、每次调用都重新载入。
+/// 常见配置（助手留空、或翻译走 NLLB）只会占 1 个槽。
+const MODEL_SLOTS: usize = 2;
+
+/// 已加载模型的 LRU 缓存（最近使用的排在最前），避免每次调用都重新载入
+fn model_slot() -> &'static Mutex<Vec<Loaded>> {
+    static SLOT: OnceLock<Mutex<Vec<Loaded>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn strip_unc(p: &str) -> String {
@@ -138,15 +143,20 @@ fn run(model_path: &str, prompt: &str, max_tokens: usize, temp: f32) -> Result<S
         return Err("未指定模型路径".into());
     }
     let mut slot = model_slot().lock().map_err(|_| "模型锁中毒".to_string())?;
-    let need_load = slot.as_ref().map(|l| l.path != path).unwrap_or(true);
-    if need_load {
-        let params = LlamaModelParams::default().with_n_gpu_layers(0);
-        let model = LlamaModel::load_from_file(backend(), &path, &params)
-            .map_err(|e| format!("加载 GGUF 失败：{e}"))?;
-        *slot = Some(Loaded { path: path.clone(), model });
+    match slot.iter().position(|l| l.path == path) {
+        Some(i) => {
+            let hit = slot.remove(i); // 命中即提到队首（LRU）
+            slot.insert(0, hit);
+        }
+        None => {
+            let params = LlamaModelParams::default().with_n_gpu_layers(0);
+            let model = LlamaModel::load_from_file(backend(), &path, &params)
+                .map_err(|e| format!("加载 GGUF 失败：{e}"))?;
+            slot.insert(0, Loaded { path: path.clone(), model });
+            slot.truncate(MODEL_SLOTS); // 超出上限的最久未用者在此释放
+        }
     }
-    let model = &slot.as_ref().unwrap().model;
-    generate(model, prompt, max_tokens, temp)
+    generate(&slot[0].model, prompt, max_tokens, temp)
 }
 
 fn generate(model: &LlamaModel, prompt: &str, max_tokens: usize, temp: f32) -> Result<String, String> {

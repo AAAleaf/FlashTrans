@@ -5,11 +5,11 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   loadSettings, saveSettings, activeProfile, applyTheme, applyScale, onSettingsChanged,
-  LANGS_FULL, resolveTarget, llmStream, translateMessages,
+  LANGS_FULL, resolveLangPair, llmStream, translateMessages,
   makeSearchDropdown, makeDropdown, toast, ICONS, mountWinControls, el, comboFromEvent,
   collectModels, probeModel, localTranslate, localReady,
-  ensurePrompts, activeDomainPrompt,
-  type Settings, type ModelInfo, type SearchItem,
+  ensurePrompts, activeDomainPrompt, ensureOcr, assistantModel,
+  type Settings, type ModelInfo, type SearchItem, type OcrProfile,
 } from "./shared";
 
 const HK_DEFAULTS: Record<string, string> = { f1: "F1", f2: "F2", f3: "F3", f4: "F4", f5: "F5" };
@@ -104,10 +104,13 @@ async function main() {
     $("src-count").textContent = srcText.value ? `${srcText.value.length}` : "";
   });
   srcText.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      translate();
-    }
+    if (e.key !== "Enter") return;
+    // 输入法组词中的回车是「上屏」，不能当成翻译（中文输入必踩）
+    if (e.isComposing || e.keyCode === 229) return;
+    // Enter 直接翻译，Shift+Enter 换行；Ctrl/⌘+Enter 保留给习惯了旧快捷键的人
+    if (e.shiftKey) return;
+    e.preventDefault();
+    translate();
   });
   $("src-copy").addEventListener("click", async () => {
     if (!srcText.value) return;
@@ -152,11 +155,15 @@ async function main() {
     fillApiEditor();
     renderProfiles();
     renderPrompts();
+    renderOcrProfiles();
     segSet("seg-theme", settings.theme);
     segSet("seg-stay", String(settings.popupStaySecs));
     segSet("seg-clickout", settings.closeOnBlur ? "1" : "0");
     segSet("seg-scale", String(settings.uiScale));
     segSet("seg-ocr", settings.local.ocrEnabled ? "1" : "0");
+    segSet("seg-autoswap", settings.autoSwap ? "1" : "0");
+    segSet("seg-snipoverlay", settings.snipOverlay ? "1" : "0");
+    refreshAutostart();
     renderEngineSeg();
     renderHotkeys();
     refreshModels();
@@ -169,9 +176,21 @@ async function main() {
     const isApi = settings.local.mode === "api";
     segSet("seg-engine", isApi ? "api" : "local");
     $("local-box").style.display = isApi ? "none" : "";
+    renderApiNote(isApi);
     renderOcrToggle();
     renderPromptNote();
     renderQuick();
+  }
+
+  // API 配置常驻在引擎开关下面：选「在线 API」时它就是翻译引擎；选「本地离线」时
+  // 它不参与翻译，只在没有 .gguf 时兜底 F4 对话 / OCR 纠错。用文案说清，免得两边来回跳。
+  function renderApiNote(isApi: boolean) {
+    $("api-title").textContent = isApi
+      ? "在线 API（当前翻译引擎 · OpenAI 兼容 · 自备 Key）"
+      : "在线 API（当前不用于翻译 · 仅作对话 / 纠错兜底）";
+    $("api-note").textContent = isApi
+      ? "可保存多套 API（DeepSeek / Kimi / 本地 Ollama…），点击某条即切换为生效预设，主界面右下角也能快速切换；点 🗑 删除。"
+      : "当前用本地模型翻译，这里填的 API 不参与翻译；但在没有 .gguf 大模型时，F4 对话与 OCR 纠错会用它兜底。";
   }
 
   // 领域提示词与 OCR 纠错同理：只有大模型（qwen）与 API 能遵循；NLLB/Opus 忽略。
@@ -308,6 +327,7 @@ async function main() {
       pathEl.textContent = root;
       pathEl.title = root;
       renderModels();
+      renderAssistant(); // 助手模型下拉的候选项就是扫到的 .gguf
     } catch (e) {
       toast(`扫描模型失败：${e}`, false);
     }
@@ -489,6 +509,235 @@ async function main() {
       await saveSettings(settings);
       toast(on ? "截图翻译将自动纠正 OCR 错字" : "已关闭 OCR 纠错");
     });
+  });
+  document.querySelectorAll("#seg-autoswap button").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const on = (b as HTMLElement).dataset.v === "1";
+      settings.autoSwap = on;
+      segSet("seg-autoswap", on ? "1" : "0");
+      await saveSettings(settings);
+      toast(on ? "已开启双向自动切换" : "已关闭双向自动切换");
+    });
+  });
+  document.querySelectorAll("#seg-snipoverlay button").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const on = (b as HTMLElement).dataset.v === "1";
+      settings.snipOverlay = on;
+      segSet("seg-snipoverlay", on ? "1" : "0");
+      await saveSettings(settings);
+      toast(on ? "截图翻译将把译文覆盖在原文上" : "截图翻译只用弹窗显示");
+    });
+  });
+
+  // ── 开机自启（真值在注册表里，不进 settings.json，避免和安装包的勾选项打架）──
+  async function refreshAutostart() {
+    try {
+      const on = (await invoke("autostart_get")) as boolean;
+      segSet("seg-autostart", on ? "1" : "0");
+    } catch {
+      segSet("seg-autostart", "0");
+    }
+  }
+  document.querySelectorAll("#seg-autostart button").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const on = (b as HTMLElement).dataset.v === "1";
+      try {
+        await invoke("autostart_set", { enabled: on });
+        segSet("seg-autostart", on ? "1" : "0");
+        toast(on ? "已设为开机启动（只进托盘，不弹窗口）" : "已取消开机启动");
+      } catch (e) {
+        toast(`设置开机启动失败：${e}`, false);
+        await refreshAutostart();
+      }
+    });
+  });
+
+  // ── 对话 / 纠错模型（可与翻译模型不同的 .gguf）──
+  function renderAssistant() {
+    const box = $("assist-pick");
+    box.innerHTML = "";
+    const ggufs = models.filter((m) => m.kind === "qwen" && m.ready);
+    const items: [string, string][] = [
+      ["", ggufs.length ? "跟随翻译模型" : "跟随翻译模型（未发现 .gguf 模型）"],
+      ...ggufs.map((m) => [m.path, m.label] as [string, string]),
+    ];
+    const cur = items.some(([v]) => v === (settings.local.assistantModel ?? "")) ? settings.local.assistantModel ?? "" : "";
+    const dd = makeDropdown(items, cur, async (v) => {
+      settings.local.assistantModel = v;
+      await saveSettings(settings);
+      renderAssistantNote();
+      toast(v ? `对话 / 纠错用 ${items.find(([x]) => x === v)?.[1]}` : "对话 / 纠错跟随翻译模型");
+    });
+    box.appendChild(dd.root);
+    renderAssistantNote();
+  }
+
+  function renderAssistantNote() {
+    const note = $("assist-note");
+    const active = assistantModel(settings);
+    const dedicated = (settings.local.assistantModel ?? "").trim();
+    if (dedicated) {
+      note.textContent =
+        "已指定专用大模型：F4 对话与 OCR 纠错走它，翻译仍走上面选中的模型。两个模型会各占一份内存。";
+    } else if (active) {
+      note.textContent = "当前翻译模型本身就是 .gguf 大模型，F4 对话与 OCR 纠错直接用它。";
+    } else {
+      note.textContent =
+        "F4 对话与 OCR 纠错只有大模型（.gguf）能做。翻译用 NLLB / Opus-MT 时，在这里单独指定一个 .gguf 即可（翻译仍走上面选中的模型）；也可以改用在线 API。";
+    }
+  }
+
+  // ── 自定义 OCR 模型 ──
+  let ocrEditing = ""; // 保持展开编辑状态的预设名（跨重渲染）
+
+  function ocrPickRow(label: string, hint: string, value: string, filters: { name: string; extensions: string[] }[]) {
+    const row = el("div", "ocr-pick");
+    const left = el("div", "mi-info");
+    const path = el("div", "mi-detail", value || hint);
+    path.title = value;
+    left.append(el("div", "mi-name", label), path);
+    const pick = el("button", "btn small", "选择…");
+    let cur = value;
+    pick.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const picked = await openDialog({ title: label, multiple: false, filters });
+      if (typeof picked === "string") {
+        cur = picked;
+        path.textContent = picked;
+      }
+    });
+    const clear = el("button", "btn small", "清除");
+    clear.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cur = "";
+      path.textContent = hint;
+    });
+    row.append(left, pick, clear);
+    return { row, get: () => cur };
+  }
+
+  function renderOcrProfiles() {
+    const oc = ensureOcr(settings);
+    const list = $("ocr-list");
+    list.innerHTML = "";
+
+    // 固定首行：默认引擎
+    const plain = el("div", "model-item" + (oc.selected ? "" : " sel"));
+    const plainInfo = el("div", "mi-info");
+    plainInfo.append(
+      el("div", "mi-name", "默认（推荐）"),
+      el("div", "mi-detail", "中/英用内置 RapidOCR，其他语种用 Windows 自带 OCR"),
+    );
+    plain.append(el("div", "mi-radio"), plainInfo);
+    plain.addEventListener("click", async () => {
+      if (!ensureOcr(settings).selected) return;
+      ensureOcr(settings).selected = "";
+      await saveSettings(settings);
+      renderOcrProfiles();
+      toast("已切回默认 OCR");
+    });
+    list.appendChild(plain);
+
+    for (const p of oc.profiles) {
+      const item = el("div", "model-item" + (oc.selected === p.name ? " sel" : ""));
+      const info = el("div", "mi-info");
+      const rec = p.recPath ? p.recPath.split(/[\\/]/).pop() : "";
+      info.append(
+        el("div", "mi-name", p.name),
+        el("div", "mi-detail", rec ? `识别模型 ${rec}` : "（未选识别模型，点 ✎ 配置）"),
+      );
+
+      const editBtn = el("button", "mi-edit");
+      editBtn.title = "编辑名称 / 模型文件";
+      editBtn.innerHTML = ICONS.edit;
+      const rmBtn = el("button", "mi-edit");
+      rmBtn.title = "删除此 OCR 模型";
+      rmBtn.innerHTML = ICONS.trash;
+
+      const editBox = el("div", "mi-edit-box");
+      const nameIn = el("input", "f-input") as HTMLInputElement;
+      nameIn.placeholder = "名称（如 韩语 / 俄语）";
+      nameIn.value = p.name;
+      // 只留两个选择：模型本体 + 字典。输入高度、是否需要字典都由后端读 ONNX 自动判断，
+      // 检测模型用内置的、方向分类关掉（截图不会倒着放），不再让用户猜这些参数。
+      const recRow = ocrPickRow("识别模型 (.onnx)", "必选", p.recPath, [
+        { name: "ONNX 模型", extensions: ["onnx"] },
+      ]);
+      const keysRow = ocrPickRow("字典 (.txt)", "留空即可：会自动在模型同目录里找", p.keysPath, [
+        { name: "字典", extensions: ["txt"] },
+      ]);
+      const editRow = el("div", "row-end");
+      const saveBtn = el("button", "btn small tint", "保存");
+      editRow.appendChild(saveBtn);
+      editBox.append(nameIn, recRow.row, keysRow.row, editRow);
+      if (ocrEditing === p.name) item.classList.add("editing");
+
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const on = item.classList.toggle("editing");
+        ocrEditing = on ? p.name : "";
+      });
+      nameIn.addEventListener("click", (e) => e.stopPropagation());
+      editBox.addEventListener("click", (e) => e.stopPropagation());
+
+      saveBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const oc2 = ensureOcr(settings);
+        const tgt = oc2.profiles.find((x) => x.name === p.name);
+        if (!tgt) return;
+        const newName = nameIn.value.trim() || tgt.name;
+        if (oc2.profiles.some((x) => x !== tgt && x.name === newName)) {
+          toast(`已有同名 OCR 模型「${newName}」`, false);
+          return;
+        }
+        if (oc2.selected === tgt.name) oc2.selected = newName;
+        tgt.name = newName;
+        tgt.recPath = recRow.get();
+        tgt.keysPath = keysRow.get();
+        ocrEditing = "";
+        await saveSettings(settings);
+        renderOcrProfiles();
+        toast("已保存 OCR 模型");
+      });
+
+      rmBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const oc2 = ensureOcr(settings);
+        oc2.profiles = oc2.profiles.filter((x) => x.name !== p.name);
+        if (oc2.selected === p.name) oc2.selected = "";
+        if (ocrEditing === p.name) ocrEditing = "";
+        await saveSettings(settings);
+        renderOcrProfiles();
+        toast(`已删除 OCR 模型 ${p.name}`);
+      });
+
+      item.addEventListener("click", async () => {
+        const oc2 = ensureOcr(settings);
+        if (oc2.selected === p.name) return;
+        if (!p.recPath) {
+          toast("先点 ✎ 选好识别模型 (.onnx) 再启用", false);
+          return;
+        }
+        oc2.selected = p.name;
+        await saveSettings(settings);
+        renderOcrProfiles();
+        toast(`截图 OCR：${p.name}`);
+      });
+
+      item.append(el("div", "mi-radio"), info, editBtn, rmBtn, editBox);
+      list.appendChild(item);
+    }
+  }
+
+  $("ocr-add").addEventListener("click", async () => {
+    const oc = ensureOcr(settings);
+    let n = 1;
+    while (oc.profiles.some((x) => x.name === `OCR ${n}`)) n++;
+    const p: OcrProfile = { name: `OCR ${n}`, recPath: "", keysPath: "", detPath: "", clsPath: "" };
+    oc.profiles.push(p);
+    ocrEditing = p.name; // 新建后直接展开编辑
+    await saveSettings(settings);
+    renderOcrProfiles();
   });
 
   // ── API 多预设 ──
@@ -840,7 +1089,7 @@ async function translate() {
     return;
   }
 
-  const target = resolveTarget(text, settings.sourceLang, settings.targetLang);
+  const { target } = resolveLangPair(settings, text);
   translating = true;
   btn.disabled = true;
   beginLoading();

@@ -19,6 +19,8 @@ export default defineConfig(async () => ({
         snip: resolve(__dirname, "snip.html"),
         // @ts-expect-error __dirname is a nodejs global
         pin: resolve(__dirname, "pin.html"),
+        // @ts-expect-error __dirname is a nodejs global
+        overlay: resolve(__dirname, "overlay.html"),
       },
     },
   },

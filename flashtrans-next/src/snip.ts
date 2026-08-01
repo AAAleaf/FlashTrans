@@ -1,7 +1,16 @@
 // FlashTrans F3 区域截图框选（覆盖整个虚拟桌面，裁剪按图片自然/显示尺寸比例，DPI 无关）
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emitTo } from "@tauri-apps/api/event";
-import { loadSettings, type Settings } from "./shared";
+import { loadSettings, activeOcrProfile, type Settings } from "./shared";
+
+/** OCR 返回的一个自然段：文本 + 在截图里的位置（物理像素） */
+interface OcrBlock {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 
@@ -55,7 +64,11 @@ function updateSel(x: number, y: number, w: number, h: number) {
   $("size-tag").textContent = `${Math.round(w * rx)} × ${Math.round(h * ry)}`;
 }
 
-function cropDataUrl(): { url: string; wCss: number; hCss: number } {
+/** 裁剪出框选区域。physX/Y/W/H 是相对整张全屏截图的物理像素，原位覆盖窗口靠它定位 */
+function cropDataUrl(): {
+  url: string; wCss: number; hCss: number;
+  physX: number; physY: number; physW: number; physH: number;
+} {
   const shot = $("shot") as HTMLImageElement;
   const { rx, ry } = ratios();
   const cx = Math.round(rect.x * rx);
@@ -67,11 +80,15 @@ function cropDataUrl(): { url: string; wCss: number; hCss: number } {
   canvas.height = ch;
   const ctx = canvas.getContext("2d")!;
   ctx.drawImage(shot, cx, cy, cw, ch, 0, 0, cw, ch);
-  return { url: canvas.toDataURL("image/png"), wCss: rect.w, hCss: rect.h };
+  return {
+    url: canvas.toDataURL("image/png"), wCss: rect.w, hCss: rect.h,
+    physX: cx, physY: cy, physW: cw, physH: ch,
+  };
 }
 
 async function confirmCrop() {
-  const { url, wCss, hCss } = cropDataUrl();
+  const crop = cropDataUrl();
+  const { url, wCss, hCss } = crop;
   resetUi();
   await invoke("snip_hide");
 
@@ -88,9 +105,20 @@ async function confirmCrop() {
   }
 
   try {
+    const prof = activeOcrProfile(settings);
     const res = (await invoke("native_ocr", {
-      req: { imageB64: url, sourceLang: settings.sourceLang },
-    })) as { source?: string };
+      req: {
+        imageB64: url,
+        sourceLang: settings.sourceLang,
+        custom: prof
+          ? {
+              recPath: prof.recPath, keysPath: prof.keysPath,
+              detPath: prof.detPath, clsPath: prof.clsPath,
+              recHeight: prof.recHeight ?? 0, // 0 = 让后端读 ONNX 自己判断
+            }
+          : {},
+      },
+    })) as { source?: string; blocks?: OcrBlock[] };
     const source = (res.source ?? "").trim();
     // 无论是否识别到文字，都把截图带过去，让弹窗能复制图 / 贴图
     if (!source) {
@@ -100,6 +128,22 @@ async function confirmCrop() {
       });
       return;
     }
+
+    // ── 原位覆盖：把译文盖回文字原来的位置，翻译改由覆盖窗口逐段完成，
+    //    完成后它会把整段原文/译文回传给弹窗（所以这里不再重复翻一遍）──
+    const blocks = (res.blocks ?? []).filter((b) => b.w > 0 && b.h > 0);
+    if (settings.snipOverlay && blocks.length) {
+      await emitTo("popup", "popup-mode", { mode: "status", text: "正在翻译…" });
+      await invoke("overlay_show", {
+        req: {
+          img: url, blocks,
+          x: crop.physX, y: crop.physY, w: crop.physW, h: crop.physH,
+          cssW: wCss, cssH: hCss,
+        },
+      });
+      return;
+    }
+
     await emitTo("popup", "popup-mode", {
       mode: "f1", state: "text", text: source, title: "截图翻译", ocr: true,
       cropB64: url, cropW: wCss, cropH: hCss,

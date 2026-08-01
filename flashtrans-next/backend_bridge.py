@@ -255,17 +255,77 @@ class Bridge:
         self._nllb: Ct2Translator | None = None
         self._opus_en2zh: Ct2Translator | None = None
         self._opus_zh2en: Ct2Translator | None = None
-        self._ocr = None
+        self._ocr: dict[tuple[str, str, str, str], Any] = {}
 
-    def ensure_ocr(self):
-        if self._ocr is None:
+    @staticmethod
+    def _auto_rec_opts(rec: str, keys: str, height: int) -> tuple[int, str]:
+        """自动推断 rec 模型的输入高度和字典文件，省得用户手工填一堆参数。
+
+        - 高度：直接读 ONNX 输入形状的第 3 维（PP-OCRv3/4/5=48，v1/v2.0=32）。
+          填错要么维度报错要么识别成空，是这里最容易踩的坑，所以宁可自己读。
+        - 字典：模型自带（metadata 里有 character）就不用外挂；否则在同目录找 .txt。
+        """
+        import onnxruntime as ort
+
+        sess = ort.InferenceSession(rec, providers=["CPUExecutionProvider"])
+        if not height:
+            shape = sess.get_inputs()[0].shape
+            if len(shape) >= 3 and isinstance(shape[2], int) and shape[2] > 0:
+                height = shape[2]
+
+        has_builtin_dict = "character" in sess.get_modelmeta().custom_metadata_map
+        if not keys and not has_builtin_dict:
+            folder = Path(rec).parent
+            txts = sorted(folder.glob("*.txt"))
+            preferred = [p for p in txts if any(k in p.name.lower() for k in ("dict", "key", "char"))]
+            picked = (preferred or txts)[:1]
+            if not picked:
+                raise RuntimeError(
+                    f"这个识别模型没有内嵌字典，需要配套的字典文件（一个 .txt，每行一个字符）。"
+                    f"把它和模型放在同一个文件夹（{folder}）即可自动识别，"
+                    f"或在设置里手动指定「字典」。"
+                )
+            keys = str(picked[0])
+        return height, keys
+
+    def ensure_ocr(
+        self, det: str = "", rec: str = "", keys: str = "", cls: str = "", height: int = 0
+    ):
+        """按模型路径缓存 RapidOCR 实例。
+
+        全空 = 内置中英模型（默认）。传路径则用自定义的 PP-OCR 格式 ONNX
+        （韩语/俄语/日语等系统没装语言包的语种靠这个），一个语种一份实例常驻。
+        height 是 rec 模型要求的输入高度：PP-OCRv3/v4/v5 多为 48，
+        PP-OCRv1/v2.0 时代的老模型是 32，填错会直接报维度错或识别成空。
+        """
+        if rec:
+            height, keys = self._auto_rec_opts(rec, keys, height)
+        key = (det, rec, keys, cls, str(height))
+        inst = self._ocr.get(key)
+        if inst is None:
             from rapidocr_onnxruntime import RapidOCR
 
-            self._ocr = RapidOCR()
-        return self._ocr
+            kwargs: dict[str, Any] = {}
+            if det:
+                kwargs["det_model_path"] = det
+            if rec:
+                kwargs["rec_model_path"] = rec
+            if keys:
+                # rec 模型没把字典写进 ONNX metadata 时必须外挂 keys 文件
+                kwargs["rec_keys_path"] = keys
+            if cls:
+                kwargs["cls_model_path"] = cls
+            if height:
+                kwargs["rec_img_shape"] = [3, int(height), 320]
+            inst = RapidOCR(**kwargs)
+            self._ocr[key] = inst
+        return inst
 
     def ocr_image(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """识别一张 base64 PNG（F3 框选裁剪结果），逐行返回文本。"""
+        """识别一张 base64 PNG（F3 框选裁剪结果），返回逐行文本 + 行框（原图像素坐标）。
+
+        行框供「原位覆盖」把译文贴回文字原来的位置，因此坐标必须换算回未放大的原图。
+        """
         import base64
         import io
 
@@ -275,16 +335,54 @@ class Bridge:
         b64 = str(payload.get("imageB64") or "").split(",")[-1].strip()
         img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
         # 小图放大有助识别；大图放大只会拖慢（det 内部会再缩放），不放
+        scale = 1.0
         if max(img.size) < 600:
+            scale = 2.0
             img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
         arr = np.array(img)[:, :, ::-1]
-        result, _ = self.ensure_ocr()(arr)
-        lines = [
-            str(item[1]).strip()
-            for item in (result or [])
-            if isinstance(item, (list, tuple)) and len(item) >= 2 and str(item[1]).strip()
-        ]
-        return {"source": "\n".join(lines)}
+        cls_path = str(payload.get("clsPath") or "").strip()
+        rec_path = str(payload.get("recPath") or "").strip()
+        det_path = str(payload.get("detPath") or "").strip()
+        try:
+            height = int(payload.get("recHeight") or 0)
+        except (TypeError, ValueError):
+            height = 0
+        engine = self.ensure_ocr(
+            det_path,
+            rec_path,
+            str(payload.get("keysPath") or "").strip(),
+            cls_path,
+            height,
+        )
+        # 方向分类器是按中文训练的，套在韩语等语种上会把整行判成倒置再翻转 180°，
+        # 识别结果直接归零（实测）。截图本来就不会倒着放，自定义模型默认关掉它，
+        # 除非用户自己配了对应语种的 cls 模型。
+        custom = bool(rec_path or det_path)
+        kwargs: dict[str, Any] = {}
+        if custom and not cls_path:
+            kwargs["use_cls"] = False
+        result, _ = engine(arr, **kwargs)
+
+        lines: list[dict[str, Any]] = []
+        for item in result or []:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            text = str(item[1]).strip()
+            if not text:
+                continue
+            entry: dict[str, Any] = {"text": text, "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+            box = item[0]
+            try:
+                pts = [(float(p[0]) / scale, float(p[1]) / scale) for p in box]
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                entry.update(
+                    x=min(xs), y=min(ys), w=max(xs) - min(xs), h=max(ys) - min(ys)
+                )
+            except (TypeError, ValueError, IndexError):
+                pass  # 拿不到框就只给文本，覆盖模式会自动退回整块显示
+            lines.append(entry)
+        return {"source": "\n".join(l["text"] for l in lines), "lines": lines}
 
     def ensure_nllb(self) -> Ct2Translator:
         if self._nllb is None:

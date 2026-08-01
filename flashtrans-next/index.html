@@ -34,7 +34,7 @@
       <!-- 双栏 -->
       <main class="panes">
         <section class="pane src" id="pane-src">
-          <textarea id="src-text" placeholder="输入或粘贴文本…&#10;&#10;⌃ Enter 翻译" spellcheck="false"></textarea>
+          <textarea id="src-text" placeholder="输入或粘贴文本…&#10;&#10;Enter 翻译 · Shift + Enter 换行" spellcheck="false"></textarea>
           <div class="tools">
             <button class="iconbtn" id="src-copy" title="复制原文"></button>
             <button class="iconbtn" id="src-clear" title="清空"></button>
@@ -57,7 +57,7 @@
       <footer class="actionbar">
         <span class="hint">F1 划词 · F2 打字 · F4 对话 · F5 呼出 — 全局可用</span>
         <div class="qs" id="qs-box"></div>
-        <button class="btn primary cta" id="btn-translate">翻译 <kbd>⌃⏎</kbd></button>
+        <button class="btn primary cta" id="btn-translate">翻译 <kbd>⏎</kbd></button>
       </footer>
     </div>
 
@@ -87,6 +87,24 @@
           </div>
         </div>
 
+        <div class="sec-label">启动</div>
+        <div class="card row-between">
+          <span>开机自动启动<small class="sub">开机时只驻留托盘，不弹出主窗口；重复打开只会呼出已有窗口，不会多开</small></span>
+          <div class="seg" id="seg-autostart">
+            <button data-v="1">开</button>
+            <button data-v="0">关</button>
+          </div>
+        </div>
+
+        <div class="sec-label">翻译方向</div>
+        <div class="card row-between">
+          <span>双向自动切换<small class="sub" id="swap-hint">设中→英时，遇到英文自动译成中文。按字符判断语言，只对中/日/韩/俄/阿/泰 与拉丁字母之间有效（英↔法这类同属拉丁字母的分不出）</small></span>
+          <div class="seg" id="seg-autoswap">
+            <button data-v="1">开</button>
+            <button data-v="0">关</button>
+          </div>
+        </div>
+
         <div class="sec-label">翻译引擎</div>
         <div class="card row-between">
           <span>引擎</span>
@@ -111,32 +129,16 @@
           </div>
           <div class="hk-note">两种方式任选：① 把模型放进上面的默认文件夹后点「刷新」；② 用上面的按钮直接从任意位置选择模型。点 ✎ 自定义名称和备注；点 🗑 从列表移除（只是不再显示，不会删除磁盘上的文件，可随时恢复）。</div>
         </div>
-        <div class="card row-between" id="ocr-box">
-          <span>OCR 纠错<small class="sub" id="ocr-hint">截图翻译时用大模型顺手改正识别错字</small></span>
-          <div class="seg" id="seg-ocr">
-            <button data-v="1">开</button>
-            <button data-v="0">关</button>
-          </div>
-        </div>
 
-        <div class="sec-label">领域提示词（大模型 / API 翻译生效）</div>
-        <div class="card col">
-          <div id="prompt-list" class="model-list" style="margin: 0 0 2px"></div>
-          <div class="model-add">
-            <button class="btn small" id="prompt-add">＋ 新建提示词</button>
-          </div>
-          <div class="hk-note" id="prompt-note">给翻译附加领域要求（如「医学领域，术语按规范译法」），主界面右下角可随时切换。仅对 .gguf 大模型与在线 API 生效；NLLB / Opus-MT 是专用翻译模型，无法遵循提示词。</div>
-        </div>
-
-        <div class="sec-label">翻译 API（OpenAI 兼容 · 自备 Key）</div>
-        <div class="card col">
-          <div id="profile-list" class="model-list" style="margin: 0 0 2px"></div>
+        <!-- 在线 API 配置。两种引擎下都留在这里：选「在线 API」时它就是翻译引擎的配置，
+             选「本地离线」时它是 F4 对话 / OCR 纠错的兜底，不用来回切引擎才能填 -->
+        <div class="card col" id="api-box">
+          <label class="f-label" style="margin:0" id="api-title">在线 API（OpenAI 兼容 · 自备 Key）</label>
+          <div id="profile-list" class="model-list" style="margin: 6px 0 2px"></div>
           <div class="model-add">
             <button class="btn small" id="profile-add">＋ 新建预设</button>
           </div>
-          <div class="hk-note">可保存多套 API（DeepSeek / Kimi / 本地 Ollama…），点击切换生效，主界面右下角也可快速切换；点 🗑 删除预设。</div>
-        </div>
-        <div class="card col">
+          <div class="hk-note" id="api-note"></div>
           <label class="f-label">预设名称</label>
           <input class="f-input" id="api-name" placeholder="给这套配置起个名，如 DeepSeek" spellcheck="false" />
           <label class="f-label">Base URL</label>
@@ -149,6 +151,54 @@
             <button class="btn" id="api-test">测试连接</button>
             <button class="btn tint" id="api-save">保存</button>
           </div>
+        </div>
+        <div class="card col">
+          <label class="f-label">对话 / 纠错模型（可选）</label>
+          <div id="assist-pick"></div>
+          <div class="hk-note" id="assist-note">
+            F4 对话与 OCR 纠错只有大模型（.gguf）能做。翻译用 NLLB / Opus-MT 时，在这里单独指定一个 .gguf，
+            对话和纠错就能用上，翻译仍走上面选中的模型。留空 = 跟随翻译模型（它本身是 .gguf 时才有效）。
+            两个模型会各占一份内存，按需选择。
+          </div>
+        </div>
+        <div class="card row-between" id="ocr-box">
+          <span>OCR 纠错<small class="sub" id="ocr-hint">截图翻译时用大模型顺手改正识别错字</small></span>
+          <div class="seg" id="seg-ocr">
+            <button data-v="1">开</button>
+            <button data-v="0">关</button>
+          </div>
+        </div>
+
+        <div class="sec-label">截图翻译</div>
+        <div class="card row-between">
+          <span>译文原位覆盖<small class="sub">译文直接盖在框选区域的原文上，可一键切回原文；弹窗照常出现</small></span>
+          <div class="seg" id="seg-snipoverlay">
+            <button data-v="1">开</button>
+            <button data-v="0">关</button>
+          </div>
+        </div>
+        <div class="card col">
+          <label class="f-label">自定义 OCR 模型</label>
+          <div id="ocr-list" class="model-list" style="margin: 0 0 2px"></div>
+          <div class="model-add">
+            <button class="btn small" id="ocr-add">＋ 新建 OCR 模型</button>
+          </div>
+          <div class="hk-note">
+            默认：中/英用内置 RapidOCR，其他语种用 Windows 自带 OCR（需系统装了对应语言包）。
+            韩语、俄语等没装语言包识别不了时，在这里添加 <b>PP-OCR / RapidOCR 格式的 ONNX 识别模型</b>，
+            点击即启用，点 🗑 删除。只需选模型文件本身，字典和参数会自动识别。
+            现成的模型见 <code>models\ocr\</code>（韩/日/俄已备好，配置方法见该目录里的「说明.md」）。
+            注意只支持这一种格式，TrOCR / GOT-OCR 等 Transformer 模型用不了。
+          </div>
+        </div>
+
+        <div class="sec-label">领域提示词（大模型 / API 翻译生效）</div>
+        <div class="card col">
+          <div id="prompt-list" class="model-list" style="margin: 0 0 2px"></div>
+          <div class="model-add">
+            <button class="btn small" id="prompt-add">＋ 新建提示词</button>
+          </div>
+          <div class="hk-note" id="prompt-note">给翻译附加领域要求（如「医学领域，术语按规范译法」），主界面右下角可随时切换。仅对 .gguf 大模型与在线 API 生效；NLLB / Opus-MT 是专用翻译模型，无法遵循提示词。</div>
         </div>
 
         <div class="sec-label">悬浮弹窗</div>

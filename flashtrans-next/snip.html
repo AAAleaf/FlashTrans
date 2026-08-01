@@ -7,7 +7,17 @@
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
-      body { cursor: crosshair; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+      /* 系统 crosshair 是纯黑的，压在变暗的截图上基本看不见（用户反馈）。
+         这里用一个细十字：白线 + 极淡的深色描边，深底浅底都看得清，又不喧宾夺主。 */
+      body {
+        font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+        cursor: url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'>\
+<g stroke='%23000000' stroke-opacity='.55' stroke-width='2.6' stroke-linecap='round'>\
+<path d='M12 2.5v6M12 15.5v6M2.5 12h6M15.5 12h6'/></g>\
+<g stroke='%23ffffff' stroke-width='1.2' stroke-linecap='round'>\
+<path d='M12 2.5v6M12 15.5v6M2.5 12h6M15.5 12h6'/></g></svg>") 12 12, crosshair;
+      }
       #shot {
         position: fixed; inset: 0; width: 100vw; height: 100vh;
         object-fit: fill; pointer-events: none;

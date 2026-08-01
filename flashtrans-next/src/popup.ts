@@ -5,8 +5,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   loadSettings, activeProfile, activeDomainPrompt, applyTheme, applyScale, onSettingsChanged,
-  resolveTarget, llmStream, translateMessages, localTranslate, localReady,
-  ocrCorrectAvailable, ocrCorrectMessages, localCorrectOcr,
+  resolveLangPair, llmStream, translateMessages, localTranslate, localReady,
+  ocrCorrectAvailable, ocrCorrectMessages, localCorrectOcr, assistantModel, currentScale,
   type Settings,
 } from "./shared";
 
@@ -60,8 +60,11 @@ function show(view: "f1" | "f2" | "status") {
 
 function fitHeight() {
   requestAnimationFrame(() => {
+    // scrollHeight 是未缩放的 CSS 像素，实际显示尺寸是它乘以界面缩放倍率；
+    // 不乘的话开了「大 / 特大」缩放后弹窗会被裁掉一截
+    const z = currentScale();
     const h = Math.min(560, Math.max(96, document.getElementById("pop")!.scrollHeight + 4));
-    invoke("popup_resize", { width: POPUP_W, height: h }).catch(() => {});
+    invoke("popup_resize", { width: POPUP_W * z, height: h * z }).catch(() => {});
   });
 }
 
@@ -121,7 +124,7 @@ function f1Grabbing() {
 
 /** OCR 原文纠错分发：本地 qwen 走 Rust 原生，API 走一次性 LLM 调用。调用前已确保后端可纠错。 */
 async function correctOcr(text: string): Promise<string> {
-  if (localReady(settings) && settings.local.mode === "qwen") {
+  if (assistantModel(settings)) {
     return localCorrectOcr(settings, text);
   }
   const p = activeProfile(settings);
@@ -236,7 +239,7 @@ async function f1GotText(text: string, title = "划词翻译", ocr = false) {
   const caret = document.createElement("span");
   caret.className = "stream-caret";
   dst.appendChild(caret);
-  const target = resolveTarget(text, settings.sourceLang, settings.targetLang);
+  const { target } = resolveLangPair(settings, text);
 
   await llmStream(p, translateMessages(text, target, transOcr, activeDomainPrompt(settings)), {
     onDelta: (t) => {
@@ -369,7 +372,7 @@ async function f2Translate(commitAfter = false) {
     return;
   }
 
-  const target = resolveTarget(text, settings.sourceLang, settings.targetLang);
+  const { target } = resolveLangPair(settings, text);
   await llmStream(p, translateMessages(text, target, false, activeDomainPrompt(settings)), {
     onDelta: (t) => {
       caret.insertAdjacentText("beforebegin", t);

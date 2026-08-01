@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   loadSettings, activeProfile, applyTheme, applyScale, onSettingsChanged,
-  llmStream, localChat, el, ICONS, mountWinControls, type Settings,
+  llmStream, localChat, assistantModel, el, ICONS, mountWinControls, type Settings,
 } from "./shared";
 
 const win = getCurrentWindow();
@@ -15,13 +15,13 @@ let context: { source: string; translated: string } | null = null;
 let streaming = false;
 
 function useLocalChat(): boolean {
-  return settings.local.mode === "qwen" && Boolean(settings.local.selectedModel);
+  return Boolean(assistantModel(settings));
 }
 
 function refreshBadge() {
   const b = $("model-badge");
   if (useLocalChat()) {
-    const name = settings.local.selectedModel.split(/[\\/]/).pop() || "GGUF";
+    const name = assistantModel(settings).split(/[\\/]/).pop() || "GGUF";
     b.textContent = `本地 · ${name}`;
     b.className = "badge";
     return;
@@ -73,7 +73,7 @@ async function send() {
     if (settings.local.mode !== "api" && settings.local.selectedModel) {
       addMsg(
         "ai",
-        "当前选择的本地模型是翻译专用模型（NLLB / Opus-MT），不支持对话。\n请在设置里选择 .gguf 大语言模型（翻译+对话都行），或配置在线 API。",
+        "当前选择的本地模型是翻译专用模型（NLLB / Opus-MT），不支持对话。\n在设置 →「对话 / 纠错模型」里单独指定一个 .gguf 大模型即可（翻译仍用现在的模型），或配置在线 API。",
       ).classList.add("err");
     } else {
       addMsg("ai", "尚未配置对话引擎。请按 F5 打开主窗口 → ⚙ 设置：选择 .gguf 本地大模型，或填写 OpenAI 兼容 API。").classList.add("err");

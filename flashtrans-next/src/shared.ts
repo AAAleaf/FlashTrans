@@ -12,6 +12,8 @@ export interface LocalSettings {
   mode: "api" | "nllb" | "qwen" | "opus";
   modelsDir: string;
   selectedModel: string;
+  /** F4 对话 / OCR 纠错专用的 .gguf；留空 = 沿用翻译模型（仅它本身是 GGUF 时可用） */
+  assistantModel?: string;
   ocrEnabled: boolean;
   extraModels?: string[];
   /** 默认文件夹扫描到但被用户从列表移除的模型（只隐藏显示，不动磁盘文件） */
@@ -24,6 +26,17 @@ export interface PromptPreset {
   text: string;
 }
 
+/** 自定义 OCR 模型（RapidOCR 格式的 PP-OCR ONNX），用于系统没装语言包的语种 */
+export interface OcrProfile {
+  name: string;
+  recPath: string;
+  keysPath: string;
+  detPath: string;
+  clsPath: string;
+  /** rec 模型要求的输入高度：PP-OCRv3/v4/v5 一般 48，v1/v2.0 老模型是 32 */
+  recHeight?: number;
+}
+
 export interface Settings {
   theme: "dark" | "light";
   popupStaySecs: number;
@@ -31,10 +44,29 @@ export interface Settings {
   uiScale: number;
   sourceLang: string;
   targetLang: string;
+  /** 双向自动切换：识别到的语言正好是目标语言时，改译回源语言 */
+  autoSwap?: boolean;
+  /** 截图翻译把译文原位覆盖在框选区域上 */
+  snipOverlay?: boolean;
   local: LocalSettings;
   hotkeys: Record<string, string>;
   api: { selected: string; profiles: ApiProfile[] };
   prompts?: { selected: string; presets: PromptPreset[] };
+  ocr?: { selected: string; profiles: OcrProfile[] };
+}
+
+/** 自定义 OCR 预设容器（旧配置无此字段时就地补全） */
+export function ensureOcr(s: Settings): { selected: string; profiles: OcrProfile[] } {
+  if (!s.ocr) s.ocr = { selected: "", profiles: [] };
+  if (!Array.isArray(s.ocr.profiles)) s.ocr.profiles = [];
+  return s.ocr;
+}
+
+/** 当前生效的自定义 OCR 模型；未选返回 null（走默认 RapidOCR / 系统 OCR） */
+export function activeOcrProfile(s: Settings): OcrProfile | null {
+  const sel = s.ocr?.selected;
+  if (!sel) return null;
+  return s.ocr?.profiles?.find((p) => p.name === sel) ?? null;
 }
 
 /** 领域提示词预设容器（旧配置无此字段时就地补全） */
@@ -105,7 +137,17 @@ export function applyTheme(theme: string) {
 /** 界面缩放：用 CSS zoom 整体放大/缩小（解决不同分辨率下字忽大忽小） */
 export function applyScale(scale?: number) {
   const z = scale && scale > 0.4 ? scale : 1;
-  (document.documentElement.style as { zoom?: string }).zoom = String(z);
+  const root = document.documentElement;
+  (root.style as { zoom?: string }).zoom = String(z);
+  // zoom 不会改变 vh 的取值，100vh 会被一起放大 z 倍 → 底栏（翻译/复制按钮）被挤出窗口，
+  // 用户点不到也看不见。把视口高度按 1/z 换算回来，布局才仍然是"刚好一屏"。
+  root.style.setProperty("--vh-scale", String(1 / z));
+}
+
+/** 当前界面缩放倍率（窗口自适应高度时要把 CSS 像素换算成实际显示高度） */
+export function currentScale(): number {
+  const z = parseFloat((document.documentElement.style as { zoom?: string }).zoom || "1");
+  return Number.isFinite(z) && z > 0 ? z : 1;
 }
 
 export function onSettingsChanged(cb: (s: Settings) => void) {
@@ -169,16 +211,25 @@ export function localReady(settings: Settings): boolean {
   return settings.local.mode !== "api" && Boolean(settings.local.selectedModel);
 }
 
+/** F4 对话 / OCR 纠错要用的本地 GGUF：优先专用助手模型，否则翻译模型本身是 GGUF 时用它 */
+export function assistantModel(settings: Settings): string {
+  const dedicated = (settings.local.assistantModel ?? "").trim();
+  if (dedicated) return dedicated;
+  if (settings.local.mode === "qwen" && settings.local.selectedModel) return settings.local.selectedModel;
+  return "";
+}
+
 export async function localTranslate(settings: Settings, text: string, ocr = false): Promise<string> {
+  const { source, target } = resolveLangPair(settings, text);
   const res = (await invoke("local_translate", {
     req: {
       backend: settings.local.mode,
       model: settings.local.selectedModel,
       text,
-      sourceLang: settings.sourceLang,
-      targetLang: settings.targetLang,
+      sourceLang: source,
+      targetLang: target,
       // 目标语言英文名（喂给本地 GGUF 提示词，比 FLORES 码可靠）；auto 时留空由后端解析
-      targetName: settings.targetLang !== "auto" ? langEnglish(settings.targetLang) : "",
+      targetName: target !== "auto" ? langEnglish(target) : "",
       ocr,
       // 领域提示词仅 GGUF 大模型使用；NLLB/Opus 桥接忽略
       domainPrompt: activeDomainPrompt(settings),
@@ -196,8 +247,8 @@ export async function localChat(
 ): Promise<string> {
   const res = (await invoke("local_chat", {
     req: {
-      backend: settings.local.mode,
-      model: settings.local.selectedModel,
+      backend: "qwen", // 对话只有 GGUF 能做，助手模型可与翻译模型不同
+      model: assistantModel(settings),
       question,
       contextTitle,
       contextSource,
@@ -448,6 +499,32 @@ export function resolveTarget(text: string, source: string, target: string): str
   return src === "zh" || src === "zh-Hant" ? "en" : "zh";
 }
 
+/** 两个语言码是否指同一门语言（中文简繁视为同一门，避免中→中空转） */
+function sameLang(a: string, b: string): boolean {
+  const norm = (x: string) => (x.startsWith("zh") ? "zh" : x);
+  return norm(a) === norm(b);
+}
+
+/**
+ * 解析这次翻译真正要用的「源语言 → 目标语言」。
+ *
+ * 开了「双向自动切换」后：文本本身就是目标语言时，反过来译回源语言
+ * （设中→英，遇到英文就译成中文）。语言判定靠字符集，只能区分
+ * 中/日/韩/俄/阿/泰/拉丁字母，同属拉丁字母的英↔法之类分不出，故对它们不生效。
+ */
+export function resolveLangPair(settings: Settings, text: string): { source: string; target: string } {
+  const source = settings.sourceLang;
+  const target = resolveTarget(text, source, settings.targetLang);
+  if (!settings.autoSwap || !text.trim()) return { source, target };
+
+  const detected = detectLang(text);
+  if (!sameLang(detected, target)) return { source, target };
+  // 文本已经是目标语言 → 掉头：源语言明确就译回源语言，否则中英互为对方
+  const back = source && source !== "auto" ? source : detected === "zh" ? "en" : "zh";
+  if (sameLang(back, detected)) return { source, target };
+  return { source: detected, target: back };
+}
+
 let reqCounter = 1;
 
 interface StreamHandlers {
@@ -534,9 +611,13 @@ export function translateMessages(text: string, targetLang: string, ocr = false,
   ];
 }
 
-/** 是否有能纠错的 LLM 后端：本地 GGUF(qwen) 或已配置的 API。NLLB/Opus 无法纠错。 */
+/**
+ * 是否有能纠错的 LLM 后端：本地 GGUF（翻译模型本身，或单独指定的助手模型）
+ * 或已配置的 API。NLLB/Opus 是专用翻译模型，无法纠错。
+ */
 export function ocrCorrectAvailable(settings: Settings): boolean {
-  if (localReady(settings)) return settings.local.mode === "qwen";
+  if (assistantModel(settings)) return true;
+  if (localReady(settings)) return false;
   const p = activeProfile(settings);
   return Boolean(p.baseUrl && p.model);
 }
@@ -557,10 +638,10 @@ export function ocrCorrectMessages(text: string) {
   ];
 }
 
-/** 本地 GGUF 纠错（非 qwen 后端由 Rust 原样返回）。 */
+/** 本地 GGUF 纠错（非 qwen 后端由 Rust 原样返回）。用助手模型，可与翻译模型不同。 */
 export async function localCorrectOcr(settings: Settings, text: string): Promise<string> {
   const res = (await invoke("local_correct", {
-    req: { backend: settings.local.mode, model: settings.local.selectedModel, text },
+    req: { backend: "qwen", model: assistantModel(settings), text },
   })) as { text?: string };
   return (res.text ?? "").trim();
 }

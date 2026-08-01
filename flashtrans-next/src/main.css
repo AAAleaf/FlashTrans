@@ -1,5 +1,6 @@
 /* ── 仪表盘布局 ── */
-#app { display: flex; flex-direction: column; height: 100vh; }
+/* 高度要按界面缩放倍率换算：CSS zoom 不改 vh 的取值，直接写 100vh 在放大后会溢出窗口 */
+#app { display: flex; flex-direction: column; height: calc(100vh * var(--vh-scale, 1)); }
 
 .langbar {
   display: flex; align-items: center; justify-content: center; gap: 12px;
@@ -53,12 +54,15 @@
 
 /* ── 设置面板（iOS Sheet）── */
 .sheet-mask {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 200;
+  position: fixed; inset: 0; height: calc(100vh * var(--vh-scale, 1));
+  background: rgba(0, 0, 0, 0.35); z-index: 200;
   opacity: 0; pointer-events: none; transition: opacity 0.3s var(--ease);
 }
 .sheet-mask.on { opacity: 1; pointer-events: auto; }
+/* 同 #app：高度按缩放倍率换算，否则放大后面板底部会伸到窗口外面去 */
 .sheet {
-  position: fixed; top: 8px; right: 8px; bottom: 8px; width: 400px; z-index: 201;
+  position: fixed; top: 8px; right: 8px; height: calc(100vh * var(--vh-scale, 1) - 16px);
+  width: 400px; z-index: 201;
   background: var(--tint-solid); border: 1px solid var(--hairline); border-radius: 16px;
   box-shadow: var(--shadow-menu);
   transform: translateX(calc(100% + 20px)); transition: transform 0.42s var(--spring);
@@ -128,6 +132,9 @@
 .model-item.editing { flex-wrap: wrap; }
 .model-item.editing .mi-edit-box { display: flex; }
 .model-restore { display: flex; justify-content: center; padding: 2px 0; }
+/* 自定义 OCR 模型的文件选择行：左侧标题+路径，右侧「选择…／清除」 */
+.ocr-pick { display: flex; align-items: center; gap: 8px; }
+.ocr-pick .mi-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .models-dir { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-3); margin-top: 8px; }
 .models-dir span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; direction: rtl; text-align: left; }
 

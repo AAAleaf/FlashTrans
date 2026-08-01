@@ -1,4 +1,4 @@
-# 构建独立 CT2 翻译桥接 flashtrans-bridge.exe（用户免装 Python）
+﻿﻿# 构建独立 CT2 翻译桥接 flashtrans-bridge.exe（用户免装 Python）
 # 前提：仓库根 .venv 已安装 requirements-bridge.txt 与 pyinstaller
 #   ..\.venv\Scripts\pip install -r requirements-bridge.txt pyinstaller
 # 输出：flashtrans-next\installer\bridge-dist\flashtrans-bridge\

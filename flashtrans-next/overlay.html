@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FlashTrans Overlay</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      body {
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        user-select: none; -webkit-user-select: none;
+      }
+      /* 底图 = 框选区域的原始截图，译文块盖在它上面 */
+      #shot { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+      #blocks { position: fixed; inset: 0; }
+      #blocks.hidden { display: none; }
+      .blk {
+        position: absolute; overflow: hidden;
+        display: flex; align-items: center;
+        padding: 1px 2px; line-height: 1.18;
+        white-space: pre-wrap; word-break: break-word;
+        border-radius: 2px;
+      }
+      .blk.pending { opacity: 0.45; font-style: italic; }
+      /* 工具条：默认完全隐藏（小截图里它会把译文整个盖住），鼠标移进来才浮现 */
+      #bar {
+        position: fixed; top: 6px; right: 6px; display: flex; gap: 6px;
+        opacity: 0; pointer-events: none; transition: opacity 0.15s;
+      }
+      body:hover #bar { opacity: 1; pointer-events: auto; }
+      #bar button {
+        border: 0; border-radius: 6px; cursor: pointer;
+        background: rgba(18, 20, 26, 0.86); color: #f2f4f8;
+        font: inherit; font-size: 12px; padding: 4px 10px; white-space: nowrap;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      }
+      #bar button:hover { background: rgba(40, 44, 54, 0.95); }
+      /* 窄/矮的截图：按钮缩成图标，并贴到右下角，尽量不压住文字 */
+      body.tiny #bar { top: auto; bottom: 3px; right: 3px; gap: 3px; }
+      body.tiny #bar button { font-size: 11px; padding: 2px 6px; border-radius: 5px; }
+      body.tiny #tip { display: none; }
+      /* 提示只在刚打开时露一下就淡出，免得长期压住左上角的译文 */
+      #tip {
+        position: fixed; left: 6px; top: 6px; font-size: 11.5px;
+        background: rgba(18, 20, 26, 0.8); color: #dfe3ea;
+        padding: 3px 9px; border-radius: 6px; pointer-events: none;
+        animation: tip-fade 3.2s ease forwards;
+      }
+      body:hover #tip { animation: none; opacity: 1; }
+      @keyframes tip-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+    </style>
+  </head>
+  <body>
+    <img id="shot" alt="" />
+    <div id="blocks"></div>
+    <div id="tip">空格 对照原文 · Esc 关闭</div>
+    <div id="bar">
+      <button id="btn-toggle">显示原文</button>
+      <button id="btn-close">关闭</button>
+    </div>
+    <script type="module" src="/src/overlay.ts"></script>
+  </body>
+</html>
