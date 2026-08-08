@@ -68,6 +68,16 @@ mod win32 {
         }
     }
 
+    /// 关掉 DWM 给这个窗口的显示/隐藏过渡动画（DWMWA_TRANSITIONS_FORCEDISABLED）。
+    /// 全屏的框选窗口收起时，系统会播一段缩放动画，看起来像"那片阴影从大缩到小"。
+    /// 截图这类瞬时工具窗口不该有这种动画。
+    pub fn no_transitions(hwnd: isize) {
+        let on: u32 = 1;
+        unsafe {
+            DwmSetWindowAttribute(hwnd, 3, &on as *const u32 as *const _, 4);
+        }
+    }
+
     #[link(name = "gdi32")]
     extern "system" {
         pub fn CreateCompatibleDC(hdc: isize) -> isize;
@@ -163,14 +173,32 @@ mod win32 {
         }
     }
 
-    /// 截取整个虚拟桌面，返回 (原点x, 原点y, 宽, 高, RGBA)。
-    /// 优先 DXGI Desktop Duplication（能抓 GPU/独占全屏游戏/视频/硬件覆盖层，避免黑块），
-    /// 任一环节异常则回退 GDI（远程桌面、安全桌面、异常适配器等）。契约与旧实现一致。
-    pub fn capture_virtual_screen() -> Option<(i32, i32, i32, i32, Vec<u8>)> {
-        if let Some(v) = capture_virtual_screen_dxgi() {
-            return Some(v);
+    /// 采样判断这张图是不是几乎全黑（GDI 抓不到硬件覆盖层时就是这样）
+    fn is_mostly_black(buf: &[u8]) -> bool {
+        let mut lit = 0usize;
+        let mut seen = 0usize;
+        // 每 64 个像素采一个就够判断了，全图逐像素扫 4K 图是白花时间
+        for px in buf.chunks_exact(4).step_by(64) {
+            seen += 1;
+            if px[0] > 8 || px[1] > 8 || px[2] > 8 {
+                lit += 1;
+            }
         }
-        capture_virtual_screen_gdi()
+        seen > 0 && lit * 200 < seen // 亮点不到 0.5%
+    }
+
+    /// 截取整个虚拟桌面，返回 (原点x, 原点y, 宽, 高, RGBA)。
+    ///
+    /// GDI 优先：BitBlt 不惊动合成器，按下 F3 屏幕不会闪一下，也没有 DXGI 等一帧
+    /// 「确有桌面刷新」的那最多 500ms —— 静止桌面下那 500ms 是每次都要付的。
+    /// 只有 GDI 截出来几乎全黑（独占全屏游戏、视频硬件覆盖层、受保护内容）才退到
+    /// DXGI Desktop Duplication，它能抓到这些内容但代价是上面那两条。
+    pub fn capture_virtual_screen() -> Option<(i32, i32, i32, i32, Vec<u8>)> {
+        match capture_virtual_screen_gdi() {
+            Some(v) if !is_mostly_black(&v.4) => Some(v),
+            Some(v) => capture_virtual_screen_dxgi().or(Some(v)),
+            None => capture_virtual_screen_dxgi(),
+        }
     }
 
     struct DxgiGrab {
@@ -847,8 +875,10 @@ struct AppState {
     bridge: Mutex<Option<BridgeSession>>,
     snip_full: Mutex<Option<String>>, // F3 全屏截图 data URL，供 snip overlay 拉取
     snip_origin: Mutex<(i32, i32)>,   // 该截图对应的虚拟桌面原点，用于把框选换算回屏幕坐标
+    snip_round: Mutex<u64>,           // F3 轮次，作废上一轮延迟触发的兜底显示
     pin_img: Mutex<Option<String>>,   // 贴图窗口要显示的图片 data URL
     overlay: Mutex<Option<Value>>,    // 原位覆盖窗口要显示的数据（截图 + 分块）
+    overlay_round: Mutex<u64>,        // 覆盖窗口轮次，作废上一轮延迟触发的兜底显示
 }
 
 fn settings_file(app: &AppHandle) -> PathBuf {
@@ -869,6 +899,8 @@ fn default_settings() -> Value {
         "autoSwap": false,
         // 截图翻译把译文原位覆盖在框选区域上（另开置顶窗口），弹窗仍照常出现
         "snipOverlay": false,
+        // 覆盖层排版：auto = 文字密集的整段文档整块重排、零散文字才逐段贴回原处
+        "snipOverlayLayout": "auto",
         "local": {
             "mode": "nllb",
             "modelsDir": "",
@@ -1072,10 +1104,19 @@ fn popup_present(app: AppHandle, width: f64, height: f64, focus: bool) -> Result
 #[tauri::command]
 fn popup_resize(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
     if let Some(popup) = app.get_webview_window("popup") {
+        // 尺寸没变就别动窗口：弹窗是置顶 + 透明 + 亚克力的，每次 SetWindowPos
+        // 都会让 DWM 重做毛玻璃合成，流式输出时高频调用会拖慢整个桌面的指针合成
+        let scale = popup.scale_factor().unwrap_or(1.0);
+        if let Ok(cur) = popup.outer_size() {
+            let same_w = (cur.width as f64 - width * scale).abs() < 1.5;
+            let same_h = (cur.height as f64 - height * scale).abs() < 1.5;
+            if same_w && same_h {
+                return Ok(());
+            }
+        }
         let _ = popup.set_size(LogicalSize::new(width, height));
         // 变高后重新夹住位置，避免长译文把底部按钮顶出屏幕（够不到“复制”）
         if let Ok(pos) = popup.outer_position() {
-            let scale = popup.scale_factor().unwrap_or(1.0);
             let monitor = popup
                 .current_monitor()
                 .ok()
@@ -1105,7 +1146,10 @@ fn popup_resize(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
                 if y < top {
                     y = top;
                 }
-                let _ = popup.set_position(PhysicalPosition::new(x, y));
+                // 位置没被夹动就别再挪一次窗口（同上：能省一次 SetWindowPos 就省）
+                if (x - pos.x as f64).abs() >= 1.0 || (y - pos.y as f64).abs() >= 1.0 {
+                    let _ = popup.set_position(PhysicalPosition::new(x, y));
+                }
             }
         }
     }
@@ -1565,54 +1609,177 @@ fn append_line(out: &mut String, line: &str) {
     out.push_str(line);
 }
 
-/// OCR 逐行结果 → 自然段落：段内换行（上一行不是以句末标点结尾）合并。
-/// 屏幕上一段被 UI 折行成多行是常态，不合并会带来"莫名其妙的换行"且拖累翻译质量。
-/// 有行框时再加两条几何规则：行间距明显变大、或左边界大幅错开（分栏）也断段。
-fn group_ocr_blocks(lines: Vec<OcrLine>) -> Vec<OcrBlock> {
-    let mut lines: Vec<OcrLine> = lines.into_iter().filter(|l| !l.text.trim().is_empty()).collect();
-    let has_boxes = lines.iter().any(|l| l.w > 0.0 && l.h > 0.0);
-    if has_boxes {
-        lines.sort_by(|a, b| {
-            a.y.partial_cmp(&b.y)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
-        });
+/// 两个区间的重叠长度（负重叠记 0）
+fn span_overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    (a1.min(b1) - a0.max(b0)).max(0.0)
+}
+
+/// 把一个框并进另一个框（并集）
+fn union_box(x: &mut f32, y: &mut f32, w: &mut f32, h: &mut f32, o: &OcrLine) {
+    let right = (*x + *w).max(o.x + o.w);
+    let bottom = (*y + *h).max(o.y + o.h);
+    *x = x.min(o.x);
+    *y = y.min(o.y);
+    *w = right - *x;
+    *h = bottom - *y;
+}
+
+/// OCR 检测框 → 视觉行。RapidOCR 常把同一行切成好几个框（标点、空格、字距处断开），
+/// 不先并回一行，后面每个碎框都会被当成独立段落各翻一次。
+/// 纵向重叠过半 = 同一行；行内按 x 排序，横向空隙超过约 3.5 个字高视作分栏，就地拆开。
+fn merge_rows(mut items: Vec<OcrLine>) -> Vec<OcrLine> {
+    items.sort_by(|a, b| {
+        let (ca, cb) = (a.y + a.h / 2.0, b.y + b.h / 2.0);
+        ca.partial_cmp(&cb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut rows: Vec<Vec<OcrLine>> = Vec::new();
+    for it in items {
+        let same = match rows.last() {
+            Some(row) => {
+                let y0 = row.iter().map(|l| l.y).fold(f32::INFINITY, f32::min);
+                let y1 = row.iter().map(|l| l.y + l.h).fold(f32::NEG_INFINITY, f32::max);
+                span_overlap(it.y, it.y + it.h, y0, y1) > it.h.min(y1 - y0) * 0.5
+            }
+            None => false,
+        };
+        if same {
+            rows.last_mut().unwrap().push(it);
+        } else {
+            rows.push(vec![it]);
+        }
     }
 
-    let mut blocks: Vec<OcrBlock> = Vec::new();
-    let mut prev: Option<OcrLine> = None;
-    for line in lines {
-        let text = line.text.trim().to_string();
-        let split = match (&prev, blocks.last()) {
-            (Some(p), Some(b)) => {
-                let punct = p.text.chars().last().map(ends_sentence).unwrap_or(false);
-                let geo = if has_boxes && p.h > 0.0 && line.h > 0.0 {
-                    let gap = line.y - (p.y + p.h);
-                    // 行距超过约一个行高 = 换段；左边界错开超过 2 个字高 = 换栏
-                    gap > p.h * 0.9 || (line.x - b.x).abs() > line.h * 2.0
-                } else {
-                    false
-                };
-                punct || geo
-            }
-            _ => true,
-        };
-
-        if split {
-            blocks.push(OcrBlock { text, x: line.x, y: line.y, w: line.w, h: line.h });
-        } else if let Some(b) = blocks.last_mut() {
-            append_line(&mut b.text, &text);
-            if has_boxes && line.w > 0.0 {
-                let (r, bottom) = ((b.x + b.w).max(line.x + line.w), (b.y + b.h).max(line.y + line.h));
-                b.x = b.x.min(line.x);
-                b.y = b.y.min(line.y);
-                b.w = r - b.x;
-                b.h = bottom - b.y;
+    let mut out: Vec<OcrLine> = Vec::new();
+    for mut row in rows {
+        row.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        let mut cur: Option<OcrLine> = None;
+        for it in row {
+            let joinable = cur
+                .as_ref()
+                .map(|c| it.x - (c.x + c.w) <= c.h.max(it.h) * 3.5)
+                .unwrap_or(false);
+            if joinable {
+                let c = cur.as_mut().unwrap();
+                append_line(&mut c.text, it.text.trim());
+                union_box(&mut c.x, &mut c.y, &mut c.w, &mut c.h, &it);
+            } else {
+                out.extend(cur.take());
+                cur = Some(OcrLine { text: it.text.trim().to_string(), ..it });
             }
         }
-        prev = Some(line);
+        out.extend(cur);
+    }
+    out
+}
+
+/// 中位数（会重排输入，调用方传副本）
+fn median(v: &mut [f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v[v.len() / 2]
+}
+
+/// 视觉行 → 自然段。一行接在某段后面，要同时满足：行距和这张图的常规行距一致、
+/// 字号没变、与该段横向重叠、左边界没有大幅错开。同时匹配「所有已开的段」而不只是最后一段，
+/// 分栏排版才不会被交错的行拆散。
+///
+/// 行距按「上沿到上沿」量，不按「上一行底边到这一行上沿」：OCR 框是贴着字轮廓的，
+/// 一行里有没有 g/y 这种降部就能让框高差出两三成，用底边算行距会被这点抖动带偏 ——
+/// 正文被拦腰切成两段就是这么来的。阈值也不再用固定的行高倍数，而是跟这张图自己的
+/// 中位行距比，松排版、紧排版都成立。
+///
+/// 另外刻意不看句末标点：一段里本来就可以有好几句，按句号断段会把整段切成碎片，
+/// 逐段翻译时丢掉上下文（"有道" 被当成 "Yiddish" 就是这么来的）。
+fn rows_to_blocks(rows: Vec<OcrLine>) -> Vec<OcrBlock> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut heights: Vec<f32> = rows.iter().map(|r| r.h).filter(|h| *h > 0.0).collect();
+    let med_h = median(&mut heights).max(1.0);
+    let mut pitches: Vec<f32> = rows
+        .windows(2)
+        .map(|w| w[1].y - w[0].y)
+        .filter(|p| *p > med_h * 0.35)
+        .collect();
+    let pitch_n = pitches.len();
+    let med_pitch = median(&mut pitches);
+    // 样本够多才信这张图自己的中位行距；只有一两行时退回按行高判
+    let max_pitch = if pitch_n >= 3 && med_pitch > 0.0 { med_pitch * 1.35 } else { med_h * 2.0 };
+
+    let mut blocks: Vec<OcrBlock> = Vec::new();
+    // 每段最后一行的 (上沿, 行高, 左边界)，用于判断下一行是否接着它
+    let mut tails: Vec<(f32, f32, f32)> = Vec::new();
+
+    for r in rows {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, b) in blocks.iter().enumerate() {
+            let (last_y, last_h, left) = tails[i];
+            let pitch = r.y - last_y;
+            if pitch <= med_h * 0.35 || pitch > max_pitch {
+                continue; // 不是紧接着的下一行：同排的另一栏，或隔了一整段
+            }
+            if (r.h - last_h).abs() > r.h.max(last_h) * 0.4 {
+                continue; // 字号明显换了：标题、引文、脚注，不是同一段的续行
+            }
+            let line_h = last_h.max(r.h).max(1.0);
+            if span_overlap(r.x, r.x + r.w, b.x, b.x + b.w) < r.w.min(b.w) * 0.35 {
+                continue; // 横向不重叠 = 另一栏
+            }
+            if (r.x - left).abs() > line_h * 2.5 {
+                continue; // 左边界大幅错开：居中标题、独立条目
+            }
+            if best.map(|(_, s)| pitch < s).unwrap_or(true) {
+                best = Some((i, pitch));
+            }
+        }
+        match best {
+            Some((i, _)) => {
+                let b = &mut blocks[i];
+                append_line(&mut b.text, &r.text);
+                union_box(&mut b.x, &mut b.y, &mut b.w, &mut b.h, &r);
+                tails[i] = (r.y, r.h, r.x);
+            }
+            None => {
+                tails.push((r.y, r.h, r.x));
+                blocks.push(OcrBlock { text: r.text, x: r.x, y: r.y, w: r.w, h: r.h });
+            }
+        }
     }
     blocks
+}
+
+/// 引擎只给了文本没给坐标时的退路：上一行以句末标点收尾才断段
+fn group_by_punct(lines: Vec<OcrLine>) -> Vec<OcrBlock> {
+    let mut blocks: Vec<OcrBlock> = Vec::new();
+    let mut prev_ends = true;
+    for line in lines {
+        let text = line.text.trim().to_string();
+        if prev_ends || blocks.is_empty() {
+            blocks.push(OcrBlock { text: text.clone(), x: line.x, y: line.y, w: line.w, h: line.h });
+        } else if let Some(b) = blocks.last_mut() {
+            append_line(&mut b.text, &text);
+        }
+        prev_ends = text.chars().last().map(ends_sentence).unwrap_or(false);
+    }
+    blocks
+}
+
+/// OCR 结果 → 自然段落。段是翻译和原位覆盖的最小单位：切得太碎既丢上下文，
+/// 排版上也会散成一堆互相压住的小方块。
+fn group_ocr_blocks(lines: Vec<OcrLine>) -> Vec<OcrBlock> {
+    let items: Vec<OcrLine> = lines.into_iter().filter(|l| !l.text.trim().is_empty()).collect();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    if !items.iter().any(|l| l.w > 0.0 && l.h > 0.0) {
+        return group_by_punct(items);
+    }
+    rows_to_blocks(merge_rows(items))
 }
 
 /// 段落文本还原成给翻译引擎/弹窗看的整段原文（段间保留换行）
@@ -1767,18 +1934,22 @@ fn on_f2(app: &AppHandle) {
 /// 把 RGBA 像素编码成 PNG 的 data URL（供 snip overlay / 复制截图 / 贴图置顶复用）
 fn encode_png_data_url(w: u32, h: u32, rgba: &[u8]) -> String {
     use base64::Engine as _;
-    let img = match image::RgbaImage::from_raw(w, h, rgba.to_vec()) {
-        Some(i) => i,
-        None => return String::new(),
-    };
-    let mut buf = std::io::Cursor::new(Vec::new());
-    if image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut buf, image::ImageFormat::Png)
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+    if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+        return String::new();
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    // 这张图只在内存里转一手（webview 底图 / 剪贴板 / 贴图），不落盘，
+    // 用默认压缩率编一张 4K 全屏要好几百毫秒 —— 那正是按下 F3 后卡住的那一下。
+    let enc = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::NoFilter);
+    if enc
+        .write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
         .is_err()
     {
         return String::new();
     }
-    let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
     format!("data:image/png;base64,{b64}")
 }
 
@@ -1793,10 +1964,21 @@ fn on_f3(app: &AppHandle) {
     // 上一轮的原位覆盖窗口是置顶的，不先收起来会被一起截进新截图里
     if let Some(w) = app.get_webview_window("overlay") {
         if w.is_visible().unwrap_or(false) {
+            // 先让它把画面清空并画出来，再隐藏。直接 hide 的话图层里会留着这一轮的
+            // 画面，下次显示时闪一帧旧内容（见 overlay.ts 的 clearVisual）
+            let _ = app.emit_to("overlay", "overlay-clear", json!({}));
+            std::thread::sleep(Duration::from_millis(60));
             let _ = w.hide();
             std::thread::sleep(Duration::from_millis(90)); // 等桌面重绘，否则截到残影
         }
     }
+    // 这一轮的编号：Esc 取消（snip_hide）会推进它，让下面的兜底显示作废
+    let my_round = {
+        let state = app.state::<AppState>();
+        let mut r = state.snip_round.lock().unwrap();
+        *r += 1;
+        *r
+    };
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(windows)]
@@ -1825,14 +2007,42 @@ fn on_f3(app: &AppHandle) {
         }
 
         if let Some(snip) = app2.get_webview_window("snip") {
+            // 位置尺寸先摆好，但先不显示：等 snip.ts 把新截图解码完再调 snip_show 亮出来。
+            // 先显示的话会有一两帧露着上一轮的旧截图（或半透明的实时桌面），
+            // 用户看到的就是"屏幕突兀地跳一下"。
             let _ = snip.set_position(PhysicalPosition::new(vx, vy));
             let _ = snip.set_size(tauri::PhysicalSize::new(vw as u32, vh as u32));
-            let _ = snip.show();
-            let _ = snip.set_focus();
             // 主动信号：snip.ts 收到后调 snip_data 拉取全屏图（避免 emit 早于 webview 就绪）
             let _ = app2.emit_to("snip", "snip-open", json!({}));
         }
+
+        // 兜底：webview 万一还没就绪收不到事件，1.5s 后也把窗口亮出来，
+        // 否则这次 F3 会像完全没反应。期间用户按了 Esc（snip_hide 会推进轮次）就作废。
+        let app3 = app2.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            let state = app3.state::<AppState>();
+            if *state.snip_round.lock().unwrap() != my_round {
+                return;
+            }
+            if let Some(w) = app3.get_webview_window("snip") {
+                if !w.is_visible().unwrap_or(false) {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        });
     });
+}
+
+/// 新截图在 snip 窗口里解码完成后才亮出来，避免闪出上一轮的旧图
+#[tauri::command]
+fn snip_show(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("snip") {
+        let _ = w.show();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_focus();
+    }
 }
 
 /// snip overlay 主动拉取当前的全屏截图（data URL）
@@ -1844,6 +2054,8 @@ fn snip_data(state: tauri::State<'_, AppState>) -> Option<String> {
 /// 隐藏 snip overlay（取消或完成时）
 #[tauri::command]
 fn snip_hide(app: AppHandle) {
+    // 推进轮次：这一轮已经收场，别再被延迟的兜底显示唤醒
+    *app.state::<AppState>().snip_round.lock().unwrap() += 1;
     if let Some(w) = app.get_webview_window("snip") {
         let _ = w.hide();
     }
@@ -1993,13 +2205,44 @@ fn overlay_show(app: AppHandle, req: OverlayRequest) -> Result<(), String> {
         "cssW": req.css_w, "cssH": req.css_h,
     }));
     let win = app.get_webview_window("overlay").ok_or("overlay window missing")?;
+    // 和 snip 同理：先摆好位置尺寸但不显示，等 overlay.ts 把新底图解码完再调
+    // overlay_ready。抢先显示会亮一帧上一次翻译留在图层里的旧图（旧尺寸的旧内容），
+    // 看起来就是一下"从大变小"。
     let _ = win.set_size(tauri::PhysicalSize::new(req.w.max(40), req.h.max(30)));
     let _ = win.set_position(PhysicalPosition::new(vx + req.x, vy + req.y));
-    let _ = win.show();
-    let _ = win.set_always_on_top(true);
-    let _ = win.set_focus();
     let _ = app.emit_to("overlay", "overlay-open", json!({}));
+
+    // 兜底：webview 没就绪收不到事件时也得把窗口亮出来
+    let my_round = {
+        let mut r = state.overlay_round.lock().unwrap();
+        *r += 1;
+        *r
+    };
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        let state = app2.state::<AppState>();
+        if *state.overlay_round.lock().unwrap() != my_round {
+            return;
+        }
+        if let Some(w) = app2.get_webview_window("overlay") {
+            if !w.is_visible().unwrap_or(false) {
+                let _ = w.show();
+                let _ = w.set_always_on_top(true);
+            }
+        }
+    });
     Ok(())
+}
+
+/// 新底图解码完后才亮出覆盖窗口，避免闪出上一轮的旧内容
+#[tauri::command]
+fn overlay_ready(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.show();
+        let _ = w.set_always_on_top(true);
+        let _ = w.set_focus();
+    }
 }
 
 #[tauri::command]
@@ -2009,6 +2252,8 @@ fn overlay_data(state: tauri::State<'_, AppState>) -> Option<Value> {
 
 #[tauri::command]
 fn overlay_close(app: AppHandle) {
+    // 推进轮次：这一轮已收场，别再被延迟的兜底显示唤醒
+    *app.state::<AppState>().overlay_round.lock().unwrap() += 1;
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.hide();
     }
@@ -2218,8 +2463,10 @@ pub fn run() {
             bridge: Mutex::new(None),
             snip_full: Mutex::new(None),
             snip_origin: Mutex::new((0, 0)),
+            snip_round: Mutex::new(0),
             pin_img: Mutex::new(None),
             overlay: Mutex::new(None),
+            overlay_round: Mutex::new(0),
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -2248,6 +2495,7 @@ pub fn run() {
             local_chat,
             local_correct,
             snip_data,
+            snip_show,
             snip_hide,
             native_ocr,
             copy_image,
@@ -2255,6 +2503,7 @@ pub fn run() {
             pin_data,
             pin_close,
             overlay_show,
+            overlay_ready,
             overlay_data,
             overlay_close,
             autostart_get,
@@ -2275,6 +2524,17 @@ pub fn run() {
                 if let Some(w) = app.get_webview_window(label) {
                     if let Ok(h) = w.hwnd() {
                         win32::round_corners(h.0 as isize);
+                    }
+                }
+            }
+
+            // 这几个是按一下就出、松手就走的瞬时窗口，系统的显示/隐藏缩放动画
+            // 在它们身上只会变成一闪一缩的干扰
+            #[cfg(windows)]
+            for label in ["snip", "overlay", "popup"] {
+                if let Some(w) = app.get_webview_window(label) {
+                    if let Ok(h) = w.hwnd() {
+                        win32::no_transitions(h.0 as isize);
                     }
                 }
             }
@@ -2315,4 +2575,99 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// OCR 分段是原位覆盖排版和翻译质量的地基，切错了后面全歪，用几个真实版式钉住它。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrLine {
+        OcrLine { text: text.into(), x, y, w, h }
+    }
+
+    /// RapidOCR 常把同一视觉行切成几个检测框，必须先并回一行再谈分段
+    #[test]
+    fn same_row_boxes_merge_into_one_block() {
+        let blocks = group_ocr_blocks(vec![
+            line("功能很全面了，", 10.0, 100.0, 120.0, 20.0),
+            line("我现在在用有道翻译，", 140.0, 101.0, 180.0, 20.0),
+            line("功能都没你这么多。", 10.0, 126.0, 170.0, 20.0),
+        ]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "功能很全面了，我现在在用有道翻译，功能都没你这么多。");
+    }
+
+    /// 一段里本来就能有好几句：句号不该断段，否则逐段翻译时丢上下文
+    #[test]
+    fn sentence_end_does_not_split_a_contiguous_paragraph() {
+        let blocks = group_ocr_blocks(vec![
+            line("这是第一句。", 10.0, 100.0, 300.0, 20.0),
+            line("这是同一段的第二句。", 10.0, 126.0, 280.0, 20.0),
+        ]);
+        assert_eq!(blocks.len(), 1);
+    }
+
+    /// 行距明显变大 = 换段
+    #[test]
+    fn blank_line_splits_paragraphs() {
+        let blocks = group_ocr_blocks(vec![
+            line("第一段的正文", 10.0, 100.0, 300.0, 20.0),
+            line("第二段的正文", 10.0, 170.0, 300.0, 20.0),
+        ]);
+        assert_eq!(blocks.len(), 2);
+    }
+
+    /// 分栏：横向不重叠的行不能并进同一段，且要按「先左栏后右栏」的顺序出现
+    #[test]
+    fn columns_stay_separate_and_in_reading_order() {
+        let blocks = group_ocr_blocks(vec![
+            line("left one", 10.0, 100.0, 180.0, 20.0),
+            line("right one", 400.0, 100.0, 180.0, 20.0),
+            line("left two", 10.0, 126.0, 180.0, 20.0),
+            line("right two", 400.0, 126.0, 180.0, 20.0),
+        ]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "left one left two");
+        assert_eq!(blocks[1].text, "right one right two");
+    }
+
+    /// 正文行的框高会随有没有 g/y 降部抖动，不能因此把一段拦腰切开。
+    /// （实测回归：一段 6 行的英文正文被切成 3 行 + 3 行两段）
+    #[test]
+    fn jittery_box_heights_do_not_split_a_paragraph() {
+        // 行距固定 26，框高在 17/20 之间抖
+        let hs = [20.0, 17.0, 20.0, 17.0, 20.0, 18.0];
+        let rows: Vec<OcrLine> = hs
+            .iter()
+            .enumerate()
+            .map(|(i, h)| line("body line", 10.0, 100.0 + i as f32 * 26.0, 300.0, *h))
+            .collect();
+        assert_eq!(group_ocr_blocks(rows).len(), 1);
+    }
+
+    /// 标题字号比正文大，不能被并进正文第一段
+    /// （实测回归：标题 + 正文首行并成一块后，NLLB 只译出标题，正文首句整句丢失）
+    #[test]
+    fn larger_heading_does_not_absorb_body_text() {
+        let blocks = group_ocr_blocks(vec![
+            line("The Quiet Hour", 10.0, 100.0, 160.0, 30.0),
+            line("There is a particular kind of silence", 10.0, 148.0, 300.0, 19.0),
+            line("that descends upon a city at dawn", 10.0, 174.0, 300.0, 19.0),
+        ]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "The Quiet Hour");
+    }
+
+    /// 引擎没给坐标时退回按句末标点分段
+    #[test]
+    fn without_boxes_falls_back_to_punctuation() {
+        let blocks = group_ocr_blocks(vec![
+            line("第一句结束。", 0.0, 0.0, 0.0, 0.0),
+            line("第二段第一行", 0.0, 0.0, 0.0, 0.0),
+            line("第二段第二行", 0.0, 0.0, 0.0, 0.0),
+        ]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1].text, "第二段第一行第二段第二行");
+    }
 }

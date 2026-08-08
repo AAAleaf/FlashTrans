@@ -178,11 +178,60 @@ class Ct2Translator:
                 out = self.sp_tgt.decode_pieces([t for t in hyp if t not in ("</s>", "<pad>")]).strip()
                 out_by_chunk[chunk_idx] = _postprocess(out)
 
+            # 模型对某一块吐了空（小模型碰到长从句偶尔会这样）就保留原文。
+            # 宁可让用户看到一句没译的英文，也不能让整句凭空消失 —— 后者根本发现不了。
+            for chunk_idx in token_to_chunk:
+                if not out_by_chunk[chunk_idx].strip():
+                    out_by_chunk[chunk_idx] = chunks[chunk_idx].strip()
+
         return _merge_chunks(out_by_chunk)
 
 
+def _looks_like_missing_rows(lines: list[dict[str, Any]]) -> bool:
+    """行距里出现约两倍的跳变 = 中间整整少了一行，值得切条重认一次。
+
+    实测同一张图：正文行距 26，换段 39~42（1.5 倍），漏掉一行则是 51~53（2 倍），
+    所以 1.75 倍这条线能把「换段」和「漏行」分开。判错了只是多花一次 OCR 的时间，
+    不会认错内容，宁可宽一点。
+    """
+    ys = sorted(l["y"] for l in lines if l.get("h", 0) > 0)
+    if len(ys) < 6:  # 行太少统计不出常规行距，也基本不是密集长文
+        return False
+    gaps = [b - a for a, b in zip(ys, ys[1:]) if b - a > 0]
+    if len(gaps) < 3:
+        return False
+    med = sorted(gaps)[len(gaps) // 2]
+    return med > 0 and any(g > med * 1.75 for g in gaps)
+
+
+def _dedup_lines(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """切条识别的重叠区会把同一行认两次，按框位置去重，同位置留文字更全的那条。"""
+    rows.sort(key=lambda d: (d["y"], d["x"]))
+    out: list[dict[str, Any]] = []
+    for it in rows:
+        hit = None
+        for o in out:
+            vy = min(it["y"] + it["h"], o["y"] + o["h"]) - max(it["y"], o["y"])
+            vx = min(it["x"] + it["w"], o["x"] + o["w"]) - max(it["x"], o["x"])
+            if vy > min(it["h"], o["h"]) * 0.5 and vx > min(it["w"], o["w"]) * 0.5:
+                hit = o
+                break
+        if hit is None:
+            out.append(it)
+        elif len(it["text"]) > len(hit["text"]):
+            hit.update(it)
+    return out
+
+
 def _chunk_text(text: str) -> list[str]:
-    """按段落/句子切块（中文长句再按逗号切），小模型对短句质量更好。"""
+    """按段落/句子切块（长句再按逗号切），小模型对短句质量更好。
+
+    切块粒度直接决定内容会不会丢：NLLB 这类小模型碰到破折号、或者三四个逗号并列的
+    长从句时，会译着译着就把后半截整段吞掉（不是截断报错，是安静地少一半）。
+    实测四段英文原文，破折号后的内容 100% 丢失；把破折号也当作切点、并让英文的
+    逗号再切阈值向中文看齐之后，四段全部完整译出。译文会稍微直白一点，
+    但比丢句子强得多。
+    """
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     parts: list[str] = []
     for block in re.split(r"(\n+)", text):
@@ -191,7 +240,7 @@ def _chunk_text(text: str) -> list[str]:
         if block.startswith("\n"):
             parts.extend(["\n"] * len(block))
             continue
-        for seg in re.split(r"(?<=[。！？!?；;\.…])", block):
+        for seg in re.split(r"(?<=[。！？!?；;\.…—–])", block):
             seg = seg.strip()
             if not seg:
                 continue
@@ -199,11 +248,42 @@ def _chunk_text(text: str) -> list[str]:
             comma_count = seg.count("，") + seg.count(",")
             if has_zh and (len(seg) > 80 or (comma_count >= 2 and len(seg) > 40)):
                 parts.extend([s for s in re.split(r"(?<=[，,])", seg) if s.strip()])
-            elif (not has_zh) and (len(seg) > 180):
-                parts.extend([s for s in re.split(r"(?<=[,])", seg) if s.strip()])
+            elif (not has_zh) and len(seg) > 110:
+                parts.extend([s for s in re.split(r"(?<=[，,])", seg) if s.strip()])
             else:
                 parts.append(seg)
-    return parts or [text]
+    return _merge_tiny(parts) or [text]
+
+
+def _merge_tiny(parts: list[str]) -> list[str]:
+    """把过短的碎块并回相邻块再送去翻译。
+
+    破折号切点常在两头留下 "not"、"early morning—" 这种残片，单独喂给模型会译成
+    孤零零的 "没有"、"早晨-" 卡在译文里。并回去既不影响完整性，也不会有碎片。
+    """
+    def short(s: str) -> bool:
+        s = s.strip()
+        return bool(s) and len(s) < (6 if re.search(r"[一-鿿]", s) else 15)
+
+    def glue(a: str, b: str) -> str:
+        a, b = a.rstrip(), b.strip()
+        sep = "" if re.search(r"[一-鿿]$", a) or a.endswith(("—", "–")) else " "
+        return f"{a}{sep}{b}"
+
+    out: list[str] = []
+    for p in parts:
+        if p == "\n" or not p.strip():
+            out.append(p)
+        elif short(p) and out and out[-1] != "\n":
+            out[-1] = glue(out[-1], p)  # 并进上一块
+        else:
+            out.append(p)
+    # 上面只能往回并，段首的残片还得往后并一次
+    for i, p in enumerate(out):
+        if p != "\n" and short(p) and i + 1 < len(out) and out[i + 1] != "\n":
+            out[i + 1] = glue(p, out[i + 1])
+            out[i] = ""
+    return [p for p in out if p]
 
 
 def _postprocess(text: str) -> str:
@@ -339,7 +419,6 @@ class Bridge:
         if max(img.size) < 600:
             scale = 2.0
             img = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
-        arr = np.array(img)[:, :, ::-1]
         cls_path = str(payload.get("clsPath") or "").strip()
         rec_path = str(payload.get("recPath") or "").strip()
         det_path = str(payload.get("detPath") or "").strip()
@@ -361,8 +440,19 @@ class Bridge:
         kwargs: dict[str, Any] = {}
         if custom and not cls_path:
             kwargs["use_cls"] = False
-        result, _ = engine(arr, **kwargs)
+        lines = self._ocr_pass(engine, img, kwargs, scale)
+        # 疑似漏行才切条重跑：常见的字幕 / 短句 / 气泡一秒都不多花。
+        # 取并集而不是替换 —— 实测两次识别漏的不是同几行（整图漏 y=231/519，
+        # 切条漏 y=112/283），单用哪一边都还是 16 行，并起来才凑齐。
+        if _looks_like_missing_rows(lines):
+            merged = _dedup_lines(lines + self._ocr_tiled(engine, img, kwargs, scale))
+            if len(merged) > len(lines):
+                lines = merged
+        return {"source": "\n".join(l["text"] for l in lines), "lines": lines}
 
+    @staticmethod
+    def _rows_from_result(result: Any, scale: float, offset_y: float = 0.0) -> list[dict[str, Any]]:
+        """RapidOCR 原始结果 → 逐行文本 + 行框，坐标换算回未放大、未切条的原图。"""
         lines: list[dict[str, Any]] = []
         for item in result or []:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
@@ -371,9 +461,8 @@ class Bridge:
             if not text:
                 continue
             entry: dict[str, Any] = {"text": text, "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
-            box = item[0]
             try:
-                pts = [(float(p[0]) / scale, float(p[1]) / scale) for p in box]
+                pts = [(float(p[0]) / scale, (float(p[1]) + offset_y) / scale) for p in item[0]]
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]
                 entry.update(
@@ -382,7 +471,46 @@ class Bridge:
             except (TypeError, ValueError, IndexError):
                 pass  # 拿不到框就只给文本，覆盖模式会自动退回整块显示
             lines.append(entry)
-        return {"source": "\n".join(l["text"] for l in lines), "lines": lines}
+        return lines
+
+    def _ocr_pass(
+        self, engine: Any, img: Any, kwargs: dict[str, Any], scale: float
+    ) -> list[dict[str, Any]]:
+        import numpy as np
+
+        result, _ = engine(np.array(img)[:, :, ::-1], **kwargs)
+        return self._rows_from_result(result, scale)
+
+    def _ocr_tiled(
+        self, engine: Any, img: Any, kwargs: dict[str, Any], scale: float
+    ) -> list[dict[str, Any]]:
+        """把图横向切成几条重叠的带子分别识别。
+
+        检测器内部固定把整图缩到 limit_side_len=736，密集长文里正文只剩十几像素高，
+        于是整行整行地漏 —— 实测一张 19 行的图只回 16 行。每漏一行还会连带把行距
+        撑成两倍，让分段逻辑从段落中间劈开，所以一处漏行在用户眼里是「少了一句
+        又多了一个段落」两个毛病。切条之后每条里的字相对更大，行就找得回来
+        （实测切 3 条 19 行全中）。重叠区按框位置去重。
+        预放大救不了：det 内部反正要缩回去，实测放大后反而更差（2x 只剩 12 行）。
+        """
+        import numpy as np
+
+        h = img.height
+        # 每条约 320px 高。实测同一张图切 2 条和切 3 条并集结果一样（都 18 行、
+        # 行距一样规整），所以取更省时间的那档。
+        n = max(2, min(6, -(-h // 320)))
+        step = h / n
+        overlap = max(40, int(step * 0.25))
+        rows: list[dict[str, Any]] = []
+        for i in range(n):
+            top = max(0, int(i * step) - overlap)
+            bot = min(h, int((i + 1) * step) + overlap)
+            if bot - top < 20:
+                continue
+            strip = np.array(img.crop((0, top, img.width, bot)))[:, :, ::-1]
+            result, _ = engine(strip, **kwargs)
+            rows += self._rows_from_result(result, scale, offset_y=float(top))
+        return _dedup_lines(rows)
 
     def ensure_nllb(self) -> Ct2Translator:
         if self._nllb is None:

@@ -17,12 +17,28 @@
       #blocks.hidden { display: none; }
       .blk {
         position: absolute; overflow: hidden;
-        display: flex; align-items: center;
-        padding: 1px 2px; line-height: 1.18;
+        display: flex; align-items: flex-start;
+        padding: 1px 3px; line-height: 1.25;
         white-space: pre-wrap; word-break: break-word;
         border-radius: 2px;
       }
+      /* 单行的小块（按钮、标签、字幕）居中看着才不歪 */
+      .blk.mid { align-items: center; }
       .blk.pending { opacity: 0.45; font-style: italic; }
+      /* 整块重排：一张盖住整个框选区的版面，字号统一、段落照旧。
+         overflow:auto 是保险绳 —— 极端情况下最小字号仍装不下时可以滚，不至于把字裁掉 */
+      .panel {
+        position: absolute; inset: 0; overflow: auto;
+        padding: 8px 10px; line-height: 1.5;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .panel::-webkit-scrollbar { width: 6px; }
+      .panel::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.5); border-radius: 3px; }
+      /* 测量用的隐藏元素：算某个字号下译文要多高 */
+      #meas {
+        position: absolute; left: -99999px; top: 0; visibility: hidden;
+        white-space: pre-wrap; word-break: break-word;
+      }
       /* 工具条：默认完全隐藏（小截图里它会把译文整个盖住），鼠标移进来才浮现 */
       #bar {
         position: fixed; top: 6px; right: 6px; display: flex; gap: 6px;
@@ -48,14 +64,18 @@
         animation: tip-fade 3.2s ease forwards;
       }
       body:hover #tip { animation: none; opacity: 1; }
+      /* 出错提示要一直看得见，不参与淡出 */
+      #tip.warn { animation: none; opacity: 1; background: rgba(120, 32, 32, 0.88); }
       @keyframes tip-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
     </style>
   </head>
   <body>
     <img id="shot" alt="" />
     <div id="blocks"></div>
-    <div id="tip">空格 对照原文 · Esc 关闭</div>
+    <div id="meas"></div>
+    <div id="tip">空格 对照原文 · Tab 换排版 · Esc 关闭</div>
     <div id="bar">
+      <button id="btn-layout">整块重排</button>
       <button id="btn-toggle">显示原文</button>
       <button id="btn-close">关闭</button>
     </div>

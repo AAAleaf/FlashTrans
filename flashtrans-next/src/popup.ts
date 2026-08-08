@@ -58,12 +58,29 @@ function show(view: "f1" | "f2" | "status") {
   $("view-status").style.display = view === "status" ? "" : "none";
 }
 
-function fitHeight() {
+// 流式输出时每个 token 都会调 fitHeight。窗口是置顶 + 透明 + 亚克力的，
+// 每次 SetWindowPos 都要让 DWM 重做一遍毛玻璃合成；一秒几十次会把整个桌面的
+// 指针合成拖慢（有用户反馈"鼠标卡出两个"）。这里做两层节流：
+// 一帧最多算一次，且高度变化不足 6px 就不惊动窗口。
+let fitPending = false;
+let fitForce = false;
+let lastFitH = 0;
+
+/** force=false 只给流式输出用：中途高度差几像素无所谓，落定时会有一次强制校准 */
+function fitHeight(force = true) {
+  fitForce = fitForce || force;
+  if (fitPending) return;
+  fitPending = true;
   requestAnimationFrame(() => {
+    const forced = fitForce;
+    fitPending = false;
+    fitForce = false;
     // scrollHeight 是未缩放的 CSS 像素，实际显示尺寸是它乘以界面缩放倍率；
     // 不乘的话开了「大 / 特大」缩放后弹窗会被裁掉一截
     const z = currentScale();
     const h = Math.min(560, Math.max(96, document.getElementById("pop")!.scrollHeight + 4));
+    if (!forced && Math.abs(h - lastFitH) < 6) return;
+    lastFitH = h;
     invoke("popup_resize", { width: POPUP_W * z, height: h * z }).catch(() => {});
   });
 }
@@ -244,7 +261,7 @@ async function f1GotText(text: string, title = "划词翻译", ocr = false) {
   await llmStream(p, translateMessages(text, target, transOcr, activeDomainPrompt(settings)), {
     onDelta: (t) => {
       caret.insertAdjacentText("beforebegin", t);
-      fitHeight();
+      fitHeight(false);
     },
     onDone: (full) => {
       f1Final = full;
@@ -376,7 +393,7 @@ async function f2Translate(commitAfter = false) {
   await llmStream(p, translateMessages(text, target, false, activeDomainPrompt(settings)), {
     onDelta: (t) => {
       caret.insertAdjacentText("beforebegin", t);
-      fitHeight();
+      fitHeight(false);
     },
     onDone: async (full) => {
       f2Streaming = false;

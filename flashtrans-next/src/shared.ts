@@ -48,6 +48,8 @@ export interface Settings {
   autoSwap?: boolean;
   /** 截图翻译把译文原位覆盖在框选区域上 */
   snipOverlay?: boolean;
+  /** 覆盖层排版：auto 按文字密度自动选，inplace 逐段贴回原处，panel 整块重排 */
+  snipOverlayLayout?: "auto" | "inplace" | "panel";
   local: LocalSettings;
   hotkeys: Record<string, string>;
   api: { selected: string; profiles: ApiProfile[] };

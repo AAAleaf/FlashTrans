@@ -163,6 +163,7 @@ async function main() {
     segSet("seg-ocr", settings.local.ocrEnabled ? "1" : "0");
     segSet("seg-autoswap", settings.autoSwap ? "1" : "0");
     segSet("seg-snipoverlay", settings.snipOverlay ? "1" : "0");
+    segSet("seg-snipoverlaylayout", settings.snipOverlayLayout ?? "auto");
     refreshAutostart();
     renderEngineSeg();
     renderHotkeys();
@@ -526,6 +527,15 @@ async function main() {
       segSet("seg-snipoverlay", on ? "1" : "0");
       await saveSettings(settings);
       toast(on ? "截图翻译将把译文覆盖在原文上" : "截图翻译只用弹窗显示");
+    });
+  });
+  document.querySelectorAll("#seg-snipoverlaylayout button").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const v = ((b as HTMLElement).dataset.v ?? "auto") as "auto" | "inplace" | "panel";
+      settings.snipOverlayLayout = v;
+      segSet("seg-snipoverlaylayout", v);
+      await saveSettings(settings);
+      toast({ auto: "覆盖排版：按文字密度自动选", inplace: "覆盖排版：逐段贴回原处", panel: "覆盖排版：整块重排" }[v]);
     });
   });
 

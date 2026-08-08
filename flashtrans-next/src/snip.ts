@@ -24,13 +24,18 @@ async function pullShot() {
   const data = (await invoke("snip_data")) as string | null;
   const img = $("shot") as HTMLImageElement;
   ready = false;
-  if (data) {
-    // 图片加载完成后才允许框选，避免 naturalWidth 还是 0 导致裁剪比例错误
-    img.onload = () => { ready = true; };
-    img.src = data;
-    if (img.complete && img.naturalWidth > 0) ready = true;
-  }
   resetUi();
+  if (!data) return; // 还没截过图（应用刚启动时的那次主动拉取），窗口保持隐藏
+
+  img.src = data;
+  // 解码完成再让窗口现身，1.2s 兜底免得解码卡住让 F3 像没反应
+  await Promise.race([
+    img.decode().catch(() => {}),
+    new Promise((r) => setTimeout(r, 1200)),
+  ]);
+  // naturalWidth 还是 0 就不许框选，否则裁剪比例会算错
+  ready = img.naturalWidth > 0;
+  await invoke("snip_show");
 }
 
 function resetUi() {
@@ -40,7 +45,20 @@ function resetUi() {
   $("hint").style.display = "";
 }
 
+/**
+ * 收起窗口前把底图清掉。
+ * 窗口隐藏期间 WebView 不做合成，图层里一直存着上一次那张全屏截图；
+ * 下次显示时会先亮出这一帧旧图再换成新的 —— 用户看到的就是"屏幕先闪回上一个页面"。
+ * （所以在同一个页面连续截图不闪：那张旧图和当前屏幕本来就一样。）
+ * 清空之后即使抢先亮一帧也只是透明，底下就是真实桌面，察觉不到。
+ */
+function clearShot() {
+  ready = false;
+  ($("shot") as HTMLImageElement).removeAttribute("src");
+}
+
 async function cancel() {
+  clearShot();
   resetUi();
   await invoke("snip_hide");
 }
@@ -87,8 +105,9 @@ function cropDataUrl(): {
 }
 
 async function confirmCrop() {
-  const crop = cropDataUrl();
+  const crop = cropDataUrl(); // 必须先裁完再清底图
   const { url, wCss, hCss } = crop;
+  clearShot();
   resetUi();
   await invoke("snip_hide");
 
