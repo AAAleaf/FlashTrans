@@ -12,6 +12,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_opener::OpenerExt;
 
 mod gguf;
 
@@ -1816,7 +1817,8 @@ async fn local_translate(app: AppHandle, req: LocalTranslateRequest) -> Result<V
             req.domain_prompt,
         );
         return tauri::async_runtime::spawn_blocking(move || {
-            gguf::translate(&m, &text, &src, &tgt, &name, ocr, &domain).map(|t| json!({ "text": t }))
+            gguf::translate(&m, &text, &src, &tgt, &name, ocr, &domain, &mut |_| {})
+                .map(|t| json!({ "text": t }))
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -1833,6 +1835,55 @@ async fn local_translate(app: AppHandle, req: LocalTranslateRequest) -> Result<V
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 流式版本的本地翻译。事件名与 [`llm_stream`] 完全一致（`llm:delta` / `llm:done` /
+/// `llm:error` + req_id），前端因此不必为"本地/在线"各写一套接收逻辑。
+///
+/// 只有 GGUF 大模型是逐 token 生成的；NLLB / Opus 是整句一次出结果的翻译模型，
+/// 没有中间态可流，这里退回一次性调用再补一个 done 事件，对前端保持同一套协议。
+#[tauri::command]
+async fn local_translate_stream(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    req_id: u64,
+    req: LocalTranslateRequest,
+) -> Result<(), String> {
+    if req.backend != "qwen" {
+        match local_translate(app, req).await {
+            Ok(v) => {
+                let full = v.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                let _ = window.emit("llm:done", json!({ "id": req_id, "full": full }));
+            }
+            Err(e) => {
+                let _ = window.emit("llm:error", json!({ "id": req_id, "message": e }));
+            }
+        }
+        return Ok(());
+    }
+
+    let (m, text, src, tgt, name, ocr, domain) = (
+        req.model, req.text, req.source_lang, req.target_lang, req.target_name, req.ocr,
+        req.domain_prompt,
+    );
+    let w = window.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        gguf::translate(&m, &text, &src, &tgt, &name, ocr, &domain, &mut |piece| {
+            let _ = w.emit("llm:delta", json!({ "id": req_id, "text": piece }));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match out {
+        Ok(full) => {
+            let _ = window.emit("llm:done", json!({ "id": req_id, "full": full }));
+        }
+        Err(e) => {
+            let _ = window.emit("llm:error", json!({ "id": req_id, "message": e }));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1862,7 +1913,7 @@ async fn local_chat(app: AppHandle, req: LocalChatRequest) -> Result<Value, Stri
             req.context_translated,
         );
         return tauri::async_runtime::spawn_blocking(move || {
-            gguf::chat(&m, &q, &t, &s, &tr).map(|out| json!({ "text": out }))
+            gguf::chat(&m, &q, &t, &s, &tr, &mut |_| {}).map(|out| json!({ "text": out }))
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -1880,6 +1931,76 @@ async fn local_chat(app: AppHandle, req: LocalChatRequest) -> Result<Value, Stri
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 流式版本的本地对话（F4）。协议同 [`local_translate_stream`]。
+/// 对话是本地模型里输出最长的一档（上限 768 token），流式对体感的改善也最大。
+#[tauri::command]
+async fn local_chat_stream(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    req_id: u64,
+    req: LocalChatRequest,
+) -> Result<(), String> {
+    if req.backend != "qwen" {
+        match local_chat(app, req).await {
+            Ok(v) => {
+                let full = v.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                let _ = window.emit("llm:done", json!({ "id": req_id, "full": full }));
+            }
+            Err(e) => {
+                let _ = window.emit("llm:error", json!({ "id": req_id, "message": e }));
+            }
+        }
+        return Ok(());
+    }
+
+    let (m, q, t, s, tr) = (
+        req.model,
+        req.question,
+        req.context_title,
+        req.context_source,
+        req.context_translated,
+    );
+    let w = window.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        gguf::chat(&m, &q, &t, &s, &tr, &mut |piece| {
+            let _ = w.emit("llm:delta", json!({ "id": req_id, "text": piece }));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match out {
+        Ok(full) => {
+            let _ = window.emit("llm:done", json!({ "id": req_id, "full": full }));
+        }
+        Err(e) => {
+            let _ = window.emit("llm:error", json!({ "id": req_id, "message": e }));
+        }
+    }
+    Ok(())
+}
+
+/// 释放本地模型占的内存。两条路径分别处理：
+/// - GGUF 权重缓存在本进程的 LRU 里，清空即 Drop，1 GB 级的内存立刻还给系统
+/// - NLLB / Opus / OCR 跑在独立的 Python 子进程里，丢掉会话即触发 `BridgeSession::Drop`
+///   里的 kill，整个进程的内存一次性释放（3 GB 级的 NLLB-3.3B 主要在这边）
+///
+/// 两者下次被用到时都会自动重新加载：GGUF 见 `gguf::run` 的 slot miss 分支，
+/// bridge 见 `bridge_request` 里 guard 为 None 时的重启逻辑。
+#[tauri::command]
+fn local_unload(state: tauri::State<'_, AppState>) -> Result<Value, String> {
+    let gguf = gguf::unload();
+    let bridge = match state.bridge.try_lock() {
+        Ok(mut g) => Some(g.take().is_some()),
+        Err(_) => None,
+    };
+    // 拿不到锁 = 正在生成中。这时候硬等会把界面卡住，不如直接让用户等它结束
+    if gguf.is_none() || bridge.is_none() {
+        return Err("本地模型正在使用中，等这次翻译 / 对话结束后再试".into());
+    }
+    Ok(json!({ "gguf": gguf.unwrap_or(0), "bridge": bridge.unwrap_or(false) }))
 }
 
 #[derive(Deserialize)]
@@ -2275,6 +2396,111 @@ fn open_folder(path: String) -> Result<(), String> {
     }
 }
 
+/* ───────── 检查更新 ─────────
+ *
+ * 刻意做成纯手动：FlashTrans 主打本地离线，启动和后台都不发任何网络请求，
+ * 只有用户在「关于」里点「检查更新」才走下面这一次 GET。请求里不带任何
+ * 个人信息、设备标识或翻译内容 —— 就是拉一个静态 JSON 比版本号。
+ *
+ * 用仓库里的静态文件而不是 GitHub API：后者未认证时限 60 次/小时/IP，
+ * 共享出口 IP 的用户（校园网、公司网）会莫名其妙地失败。
+ */
+const UPDATE_MANIFEST: &str =
+    "https://raw.githubusercontent.com/chai1220/FlashTrans/master/version.json";
+const RELEASES_PAGE: &str = "https://github.com/chai1220/FlashTrans/releases";
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    current: String,
+    latest: String,
+    /// 远端版本是否确实比当前新（不是「不相等」——用户装了预发布版时不该被劝退回旧版）
+    newer: bool,
+    notes: String,
+    url: String,
+}
+
+/// 按数字分段比较版本号。不能用字符串比较：那样 "2.10.0" < "2.3.0"。
+fn version_gt(a: &str, b: &str) -> bool {
+    fn parts(s: &str) -> Vec<u32> {
+        s.trim()
+            .trim_start_matches(['v', 'V'])
+            .split(['.', '-', '+'])
+            .map(|seg| {
+                seg.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u32>()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+    let (x, y) = (parts(a), parts(b));
+    for i in 0..x.len().max(y.len()) {
+        let (l, r) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        if l != r {
+            return l > r;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<UpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+    let resp = reqwest::Client::new()
+        .get(UPDATE_MANIFEST)
+        .header("User-Agent", "FlashTrans")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| "连接失败，请检查网络后重试".to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("检查更新失败（HTTP {}）", resp.status().as_u16()));
+    }
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|_| "更新信息格式异常".to_string())?;
+
+    let latest = v.get("version").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if latest.is_empty() {
+        return Err("更新信息里没有版本号".into());
+    }
+    Ok(UpdateInfo {
+        newer: version_gt(&latest, &current),
+        current,
+        latest,
+        notes: v.get("notes").and_then(Value::as_str).unwrap_or("").to_string(),
+        url: v
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(RELEASES_PAGE)
+            .to_string(),
+    })
+}
+
+/// 用系统默认浏览器打开链接。走 Rust 侧的 opener，前端因此不必申请 opener 的 URL 权限。
+#[tauri::command]
+fn open_url(app: AppHandle, url: Option<String>) -> Result<(), String> {
+    let target = url.unwrap_or_default();
+    let target = target.trim();
+    let target = if target.is_empty() { RELEASES_PAGE } else { target };
+    // 只放行 http(s)，避免把 file:// 之类的东西交给系统去执行
+    if !target.starts_with("https://") && !target.starts_with("http://") {
+        return Err("不支持的链接".into());
+    }
+    app.opener()
+        .open_url(target, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 fn on_f4(app: &AppHandle) {
     let clip = arboard::Clipboard::new()
         .ok()
@@ -2492,8 +2718,14 @@ pub fn run() {
             models_scan,
             model_probe,
             local_translate,
+            local_translate_stream,
             local_chat,
+            local_chat_stream,
             local_correct,
+            local_unload,
+            app_version,
+            check_update,
+            open_url,
             snip_data,
             snip_show,
             snip_hide,
@@ -2585,6 +2817,22 @@ mod tests {
     fn line(text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrLine {
         OcrLine { text: text.into(), x, y, w, h }
     }
+
+    /// 字符串比较会让 2.10.0 小于 2.3.0 —— 那样用户会被永远卡在旧版上收不到更新
+    #[test]
+    fn version_compare_is_numeric_not_lexicographic() {
+        assert!(version_gt("2.10.0", "2.3.0"));
+        assert!(!version_gt("2.3.0", "2.10.0"));
+    }
+
+    #[test]
+    fn version_compare_handles_prefix_and_short_forms() {
+        assert!(version_gt("v2.4.0", "2.3.0")); // 远端写了 v 前缀
+        assert!(version_gt("2.4", "2.3.9")); // 段数不齐时缺的位当 0
+        assert!(!version_gt("2.3.0", "2.3.0")); // 同版本不该提示更新
+        assert!(!version_gt("2.3.0", "2.4.0-beta.1")); // 预发布版用户不该被劝退回旧版
+    }
+
 
     /// RapidOCR 常把同一视觉行切成几个检测框，必须先并回一行再谈分段
     #[test]

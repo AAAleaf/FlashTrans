@@ -5,7 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   loadSettings, activeProfile, activeDomainPrompt, applyTheme, applyScale, onSettingsChanged,
-  resolveLangPair, llmStream, translateMessages, localTranslate, localReady,
+  resolveLangPair, llmStream, translateMessages, localTranslateStream, localReady,
   ocrCorrectAvailable, ocrCorrectMessages, localCorrectOcr, assistantModel, currentScale,
   type Settings,
 } from "./shared";
@@ -229,18 +229,31 @@ async function f1GotText(text: string, title = "划词翻译", ocr = false) {
     const caret = document.createElement("span");
     caret.className = "stream-caret";
     dst.appendChild(caret);
-    try {
-      const out = await localTranslate(settings, text, transOcr);
-      f1Final = out;
-      dst.textContent = out || "（无翻译结果）";
-      $<HTMLButtonElement>("f1-copy").disabled = !out;
-      $<HTMLButtonElement>("f1-ask").disabled = !out;
-    } catch (e) {
-      dst.classList.add("err");
-      dst.textContent = String(e);
-    }
-    startCountdown();
-    fitHeight();
+    await localTranslateStream(
+      settings,
+      text,
+      {
+        onDelta: (t) => {
+          caret.insertAdjacentText("beforebegin", t);
+          fitHeight(false);
+        },
+        onDone: (full) => {
+          f1Final = full;
+          dst.textContent = full || "（无翻译结果）";
+          $<HTMLButtonElement>("f1-copy").disabled = !full;
+          $<HTMLButtonElement>("f1-ask").disabled = !full;
+          startCountdown();
+          fitHeight();
+        },
+        onError: (m) => {
+          dst.classList.add("err");
+          dst.textContent = m;
+          startCountdown();
+          fitHeight();
+        },
+      },
+      transOcr,
+    );
     return;
   }
 
@@ -369,23 +382,29 @@ async function f2Translate(commitAfter = false) {
 
   // ── 本地离线模型 ──
   if (localReady(settings)) {
-    try {
-      const out = await localTranslate(settings, text);
-      f2Streaming = false;
-      f2Final = out;
-      dst.textContent = out || "（无翻译结果）";
-      fitHeight();
-      if (pendingCommit && out) {
+    await localTranslateStream(settings, text, {
+      onDelta: (t) => {
+        caret.insertAdjacentText("beforebegin", t);
+        fitHeight(false);
+      },
+      onDone: async (full) => {
+        f2Streaming = false;
+        f2Final = full;
+        dst.textContent = full || "（无翻译结果）";
+        fitHeight();
+        if (pendingCommit && full) {
+          pendingCommit = false;
+          await invoke("commit_paste", { text: full });
+        }
+      },
+      onError: (m) => {
+        f2Streaming = false;
         pendingCommit = false;
-        await invoke("commit_paste", { text: out });
-      }
-    } catch (e) {
-      f2Streaming = false;
-      pendingCommit = false;
-      dst.classList.add("err");
-      dst.textContent = String(e);
-      fitHeight();
-    }
+        dst.classList.add("err");
+        dst.textContent = m;
+        fitHeight();
+      },
+    });
     return;
   }
 

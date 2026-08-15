@@ -7,7 +7,7 @@ import {
   loadSettings, saveSettings, activeProfile, applyTheme, applyScale, onSettingsChanged,
   LANGS_FULL, resolveLangPair, llmStream, translateMessages,
   makeSearchDropdown, makeDropdown, toast, ICONS, mountWinControls, el, comboFromEvent,
-  collectModels, probeModel, localTranslate, localReady,
+  collectModels, probeModel, localTranslateStream, localUnload, localReady,
   ensurePrompts, activeDomainPrompt, ensureOcr, assistantModel,
   type Settings, type ModelInfo, type SearchItem, type OcrProfile,
 } from "./shared";
@@ -397,6 +397,59 @@ async function main() {
         toast(`无法打开文件夹：${e}`, false);
       }
     }
+  });
+
+  // 释放本地模型占的内存。GGUF 权重约 1 GB、NLLB-3.3B 约 3 GB，用完不释放会一直挂着，
+  // 之前用户只能靠重启软件。下次翻译会自动重新加载（代价是多等一次读盘）。
+  $("models-unload").addEventListener("click", async () => {
+    const btn = $<HTMLButtonElement>("models-unload");
+    btn.disabled = true;
+    try {
+      const r = await localUnload();
+      const freed = r.gguf > 0 || r.bridge;
+      toast(freed ? "已释放本地模型占用的内存" : "当前没有已加载的本地模型", true);
+    } catch (e) {
+      toast(String(e), false);
+    }
+    btn.disabled = false;
+  });
+
+  // ── 关于 / 检查更新 ──
+  // 纯手动：不在启动时、也不在后台做任何检查，只有点下面这个按钮才发一次请求。
+  invoke("app_version")
+    .then((v) => ($("about-version").textContent = `v${v}`))
+    .catch(() => {});
+
+  $("open-releases").addEventListener("click", () => {
+    invoke("open_url", { url: null }).catch((e) => toast(String(e), false));
+  });
+
+  $("check-update").addEventListener("click", async () => {
+    const btn = $<HTMLButtonElement>("check-update");
+    const note = $("update-note");
+    btn.disabled = true;
+    btn.textContent = "检查中…";
+    try {
+      const r = (await invoke("check_update")) as {
+        current: string; latest: string; newer: boolean; notes: string; url: string;
+      };
+      if (r.newer) {
+        note.textContent = `发现新版本 v${r.latest}${r.notes ? `：${r.notes}` : ""}`;
+        btn.textContent = `前往下载 v${r.latest}`;
+        btn.disabled = false;
+        btn.onclick = () => {
+          invoke("open_url", { url: r.url }).catch((e) => toast(String(e), false));
+        };
+        return;
+      }
+      note.textContent = `已是最新版本（v${r.current}）。`;
+      toast("已是最新版本", true);
+    } catch (e) {
+      note.textContent = String(e);
+      toast(String(e), false);
+    }
+    btn.textContent = "检查更新";
+    btn.disabled = false;
   });
 
   // ── 热键自定义 ──
@@ -1078,14 +1131,35 @@ async function translate() {
     translating = true;
     btn.disabled = true;
     beginLoading();
-    try {
-      const out = await localTranslate(settings, text);
-      showResult(out || "（无翻译结果）");
-    } catch (e) {
-      showResult(String(e), true);
-    }
-    translating = false;
-    btn.disabled = false;
+
+    let localStarted = false;
+    const localDst = $("dst-text");
+    const localCaret = document.createElement("span");
+    localCaret.className = "stream-caret";
+
+    await localTranslateStream(settings, text, {
+      onDelta: (t) => {
+        if (!localStarted) {
+          localStarted = true;
+          $("dst-skeleton").style.display = "none";
+          localDst.appendChild(localCaret);
+        }
+        const tok = document.createElement("span");
+        tok.className = "tok";
+        tok.textContent = t;
+        localDst.insertBefore(tok, localCaret);
+      },
+      onDone: (full) => {
+        showResult(full || "（无翻译结果）");
+        translating = false;
+        btn.disabled = false;
+      },
+      onError: (m) => {
+        showResult(m, true);
+        translating = false;
+        btn.disabled = false;
+      },
+    });
     return;
   }
 

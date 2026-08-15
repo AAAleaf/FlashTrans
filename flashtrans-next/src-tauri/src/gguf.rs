@@ -11,7 +11,6 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel, Special};
 use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::token::LlamaToken;
 
 /// 全局 backend：llama.cpp 要求每进程只初始化一次
 fn backend() -> &'static LlamaBackend {
@@ -43,12 +42,41 @@ fn strip_unc(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
 }
 
+/// 上下文长度的**天花板**，不是每次都开这么大 —— 实际大小见 [`plan_ctx`]。
+/// 因为改成了按需分配，这里可以给得很宽松，短句翻译不会因此多占一个字节 ——
+/// 只有真的翻长文时才会分配到这个量级（16384 token 的 KV cache 约 1.75 GB）。
 fn ctx_len() -> u32 {
     std::env::var("FLASHTRANS_CTX")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|n| *n >= 1024)
-        .unwrap_or(4096)
+        .filter(|n| *n >= MIN_CTX)
+        .unwrap_or(16384)
+}
+
+/// 上下文的下限。KV cache 按 n_ctx 满额预分配，但开得太小反而会让分块喂入
+/// （每块 512）失去意义，1024 是个不亏的地板。
+const MIN_CTX: u32 = 1024;
+
+/// 算出这次生成实际需要多大的上下文。
+///
+/// KV cache 是按 n_ctx **满额预分配**的（Qwen3-1.7B 约 112 KiB/token，开到 4096
+/// 就是 448 MB）。以前不管翻一个单词还是三千字都固定开到天花板，等于划词翻译
+/// 也要先划走小半个 G —— 一个常驻托盘的工具付不起这个。
+///
+/// 必须把待生成的 `max_tokens` 也算进去：只按 prompt 长度开的话，prompt 接近上限时
+/// 能通过检查，但生成到一半 KV cache 就满了，会以 "Decode Error 1: NoKvCacheSlot"
+/// 这种用户看不懂的话收场。
+fn plan_ctx(prompt_tokens: usize, max_tokens: usize, ceiling: u32) -> Result<u32, String> {
+    let need = prompt_tokens.saturating_add(max_tokens).saturating_add(64);
+    let need = u32::try_from(need).unwrap_or(u32::MAX);
+    if need > ceiling {
+        return Err(format!(
+            "输入过长：这次需要约 {need} token 的上下文，当前上限 {ceiling}。\
+             请分段翻译，或用 FLASHTRANS_CTX 环境变量调大上限。"
+        ));
+    }
+    // 向上取到 2 的幂，避免每次长度微调都重建一个尺寸略有差异的上下文
+    Ok(need.next_power_of_two().clamp(MIN_CTX, ceiling))
 }
 
 fn n_threads() -> i32 {
@@ -57,26 +85,119 @@ fn n_threads() -> i32 {
         .unwrap_or(4)
 }
 
-pub fn strip_think(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        match rest.find("<think>") {
-            Some(start) => {
-                out.push_str(&rest[..start]);
-                match rest[start..].find("</think>") {
-                    Some(end) => rest = &rest[start + end + "</think>".len()..],
+// 原先的 strip_think 在这里：一次性拿到整段输出再剥 <think>。改成流式后这活儿
+// 由 ThinkFilter 边流边做（它还得处理标签被切在两个 token 里的情况），不再需要事后版本。
+
+/// 流式输出时的 `<think>` 过滤器。
+///
+/// 一次性返回的场景可以直接用 [`strip_think`]，但流式是一段一段来的：`<think>` 这七个字
+/// 完全可能被切在两个 token 里（甚至逐字来），拿到半截就判断会把标签漏出去给用户看。
+/// 所以这里始终扣住"可能是标签前缀"的那个尾巴不发，凑够了能判定再决定发还是吞。
+struct ThinkFilter {
+    buf: String,
+    in_think: bool,
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+impl ThinkFilter {
+    fn new() -> Self {
+        Self { buf: String::new(), in_think: false }
+    }
+
+    /// buf 末尾有多长的一段是 `tag` 的真前缀（可能是被切断的标签开头）
+    fn holdback(buf: &str, tag: &str) -> usize {
+        let max = tag.len().saturating_sub(1).min(buf.len());
+        for n in (1..=max).rev() {
+            let start = buf.len() - n;
+            if buf.is_char_boundary(start) && tag.starts_with(&buf[start..]) {
+                return n;
+            }
+        }
+        0
+    }
+
+    /// 吃进一段新文本，吐出这一刻可以安全显示给用户的部分
+    fn push(&mut self, s: &str) -> String {
+        self.buf.push_str(s);
+        let mut out = String::new();
+        loop {
+            if self.in_think {
+                match self.buf.find(THINK_CLOSE) {
+                    Some(i) => {
+                        self.buf.drain(..i + THINK_CLOSE.len());
+                        self.in_think = false;
+                    }
                     None => {
-                        rest = "";
-                        break;
+                        // 思考内容整段丢弃，只留可能是 </think> 开头的尾巴
+                        let keep = Self::holdback(&self.buf, THINK_CLOSE);
+                        let cut = self.buf.len() - keep;
+                        self.buf.drain(..cut);
+                        return out;
+                    }
+                }
+            } else {
+                match self.buf.find(THINK_OPEN) {
+                    Some(i) => {
+                        out.push_str(&self.buf[..i]);
+                        self.buf.drain(..i + THINK_OPEN.len());
+                        self.in_think = true;
+                    }
+                    None => {
+                        let keep = Self::holdback(&self.buf, THINK_OPEN);
+                        let cut = self.buf.len() - keep;
+                        out.push_str(&self.buf[..cut]);
+                        self.buf.drain(..cut);
+                        return out;
                     }
                 }
             }
-            None => break,
         }
     }
-    out.push_str(rest);
-    out.trim().to_string()
+
+    /// 生成结束：把扣住的尾巴放出来（此时它已经不可能是标签了）
+    fn flush(&mut self) -> String {
+        if self.in_think {
+            self.buf.clear();
+            return String::new();
+        }
+        std::mem::take(&mut self.buf)
+    }
+}
+
+/// 卸载所有已缓存的 GGUF 模型，把权重占的内存立刻还给系统。
+/// 返回卸载了几个；正在生成时拿不到锁，返回 None 让调用方提示稍后再试。
+pub fn unload() -> Option<usize> {
+    let mut slot = model_slot().try_lock().ok()?;
+    let n = slot.len();
+    slot.clear();
+    Some(n)
+}
+
+/// 粗估一段文本的 token 数。CJK 基本一字一 token，拉丁文约四字符一 token。
+/// 只用来估预算，不需要准 —— 准的那个要等模型加载完才能分词，太晚了。
+fn estimate_tokens(text: &str) -> usize {
+    let units: usize = text
+        .chars()
+        .map(|c| if c as u32 >= 0x2E80 { 4 } else { 1 })
+        .sum();
+    units / 4 + 1
+}
+
+/// 翻译一次最多生成多少 token。
+///
+/// 以前这里是写死的 640（约 400~500 汉字）——翻译是 1:1 的任务，原文多长译文就得多长，
+/// 固定上限意味着**只要原文超过四百来字，译文就一定在中途被切断**，而且不报错。
+/// 上下文开得再大也救不了，因为先撞上的是这条线。
+///
+/// 所以按原文长度估，再留一倍余量（换语言后长度会变，中译英常涨不少）。
+/// 上限 4096 是权衡后的结果。它不是内存问题而是时间问题：纯 CPU 下 1.7B 大约每秒
+/// 十几个 token，4096 要等好几分钟。但**译到一半停住比等得久更糟** —— 前者用户拿到的
+/// 是残缺译文且不知道残缺，后者至少能看着字往外蹦、随时可以放弃。有了流式输出之后，
+/// 这个取舍明显偏向放宽。整页正文（约 800~1200 token）现在能完整译完。
+fn translate_budget(text: &str) -> usize {
+    (estimate_tokens(text) * 2).clamp(256, 4096)
 }
 
 fn detect_zh(text: &str) -> bool {
@@ -136,8 +257,15 @@ fn chatml(system: &str, user: &str, no_think: bool) -> String {
     format!("<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n{tail}")
 }
 
-/// 在缓存的模型上执行一次生成（持锁，天然串行，避免并发用同一模型）
-fn run(model_path: &str, prompt: &str, max_tokens: usize, temp: f32) -> Result<String, String> {
+/// 在缓存的模型上执行一次生成（持锁，天然串行，避免并发用同一模型）。
+/// `on_token` 每吐出一段可显示文本就被调用一次；不需要流式的调用方传 `&mut |_| {}`。
+fn run(
+    model_path: &str,
+    prompt: &str,
+    max_tokens: usize,
+    temp: f32,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
     let path = strip_unc(model_path.trim());
     if path.is_empty() {
         return Err("未指定模型路径".into());
@@ -156,11 +284,25 @@ fn run(model_path: &str, prompt: &str, max_tokens: usize, temp: f32) -> Result<S
             slot.truncate(MODEL_SLOTS); // 超出上限的最久未用者在此释放
         }
     }
-    generate(&slot[0].model, prompt, max_tokens, temp)
+    generate(&slot[0].model, prompt, max_tokens, temp, on_token)
 }
 
-fn generate(model: &LlamaModel, prompt: &str, max_tokens: usize, temp: f32) -> Result<String, String> {
-    let n_ctx = ctx_len();
+fn generate(
+    model: &LlamaModel,
+    prompt: &str,
+    max_tokens: usize,
+    temp: f32,
+    on_token: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    // 先分词，再按这次实际需要的大小开上下文（分词只用到 model，不需要 ctx）。
+    let tokens = model
+        .str_to_token(prompt, AddBos::Never)
+        .map_err(|e| format!("分词失败：{e}"))?;
+    if tokens.is_empty() {
+        return Ok(String::new());
+    }
+    let n_ctx = plan_ctx(tokens.len(), max_tokens, ctx_len())?;
+
     let threads = n_threads();
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(n_ctx))
@@ -169,16 +311,6 @@ fn generate(model: &LlamaModel, prompt: &str, max_tokens: usize, temp: f32) -> R
     let mut ctx = model
         .new_context(backend(), ctx_params)
         .map_err(|e| format!("创建上下文失败：{e}"))?;
-
-    let tokens = model
-        .str_to_token(prompt, AddBos::Never)
-        .map_err(|e| format!("分词失败：{e}"))?;
-    if tokens.is_empty() {
-        return Ok(String::new());
-    }
-    if tokens.len() as u32 >= n_ctx {
-        return Err("输入过长，超过模型上下文长度（可用 FLASHTRANS_CTX 调大）".into());
-    }
 
     // 分块喂入 prompt（每块 ≤512，兼容超长输入）
     let chunk = 512usize;
@@ -209,15 +341,54 @@ fn generate(model: &LlamaModel, prompt: &str, max_tokens: usize, temp: f32) -> R
         ])
     };
 
-    let mut gen: Vec<LlamaToken> = Vec::new();
-    let mut n_cur = batch.n_tokens();
+    // 边生成边反分词，逐段交给 on_token。两处必须攒着不能直接发：
+    // ① UTF-8 —— 一个汉字的字节常跨两个 token，半截发出去就是乱码，所以只发已成形的部分
+    //    （token_to_bytes 会按需扩容，CJK 的 token 常 >8 字节，tokens_to_str 的固定小缓冲
+    //    会撞 "Insufficient Buffer Space"）
+    // ② <think> 标签 —— 见 ThinkFilter
+    let mut pending: Vec<u8> = Vec::new();
+    let mut filter = ThinkFilter::new();
+    let mut out = String::new();
+    let mut started = false; // 首个可见字符之前的空白不外发，否则弹窗会先闪一个空行
+    // 生成的起始位置必须是整个 prompt 的长度，不是 batch 里剩下的那点。
+    // prompt 是按 512 一块喂进去的，循环结束时 batch 里只剩最后一块 ——
+    // 用 batch.n_tokens() 的话，700 token 的 prompt 会从 188 开始生成，
+    // 新 token 被写到 prompt 已占用的位置上，因果掩码按 pos 比大小，
+    // 模型生成时就只看得见开头那一小截，译文直接乱掉（超过 512 token 必现）。
+    let mut n_cur = tokens.len() as i32;
     for _ in 0..max_tokens {
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         sampler.accept(token);
         if model.is_eog_token(token) {
             break;
         }
-        gen.push(token);
+        if let Ok(b) = model.token_to_bytes(token, Special::Plaintext) {
+            pending.extend_from_slice(&b);
+        }
+        let ready = match std::str::from_utf8(&pending) {
+            Ok(s) => {
+                let s = s.to_string();
+                pending.clear();
+                s
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                let s = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                pending.drain(..valid);
+                s
+            }
+        };
+        if !ready.is_empty() {
+            let show = filter.push(&ready);
+            if !show.is_empty() {
+                out.push_str(&show);
+                let piece = if started { show.as_str() } else { show.trim_start() };
+                if !piece.is_empty() {
+                    started = true;
+                    on_token(piece);
+                }
+            }
+        }
         batch.clear();
         batch
             .add(token, n_cur, &[0], true)
@@ -226,16 +397,15 @@ fn generate(model: &LlamaModel, prompt: &str, max_tokens: usize, temp: f32) -> R
         ctx.decode(&mut batch).map_err(|e| format!("decode 失败：{e}"))?;
     }
 
-    // 逐 token 反分词：token_to_bytes 在 8 字节不够时按需扩容（CJK 的 token 常 >8 字节），
-    // 避免 tokens_to_str 固定小缓冲导致的 “Insufficient Buffer Space”
-    let mut bytes: Vec<u8> = Vec::with_capacity(gen.len() * 4);
-    for tok in &gen {
-        if let Ok(b) = model.token_to_bytes(*tok, Special::Plaintext) {
-            bytes.extend_from_slice(&b);
+    let tail = filter.flush();
+    if !tail.is_empty() {
+        out.push_str(&tail);
+        let piece = if started { tail.as_str() } else { tail.trim_start() };
+        if !piece.is_empty() {
+            on_token(piece);
         }
     }
-    let out = String::from_utf8_lossy(&bytes).to_string();
-    Ok(strip_think(&out))
+    Ok(out.trim().to_string())
 }
 
 /// 本地 GGUF 翻译。ocr=true 时启用 OCR 纠错（识别文本可能有错字，先纠正再翻译）；
@@ -248,6 +418,7 @@ pub fn translate(
     target_name: &str,
     ocr: bool,
     domain: &str,
+    on_token: &mut dyn FnMut(&str),
 ) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -269,7 +440,7 @@ pub fn translate(
         system.push_str(domain.trim());
     }
     let prompt = chatml(&system, text, true); // 关闭思考，直接出译文
-    run(model_path, &prompt, 640, 0.1)
+    run(model_path, &prompt, translate_budget(text), 0.1, on_token)
 }
 
 /// OCR 原文纠错：用上下文修正识别错字/拆字/漏字、去掉字间多余空格，输出同语言的纠正文本
@@ -295,7 +466,9 @@ pub fn correct_ocr(model_path: &str, text: &str) -> Result<String, String> {
          <|im_start|>user\n{text}<|im_end|>\n\
          <|im_start|>assistant\n{no_think}"
     );
-    run(model_path, &prompt, 768, 0.1)
+    // 纠错是翻译前的一道预处理，用户看不到中间产物，不需要流式
+    // 纠错是同语言改写，输出长度和输入基本一致，同样不该用固定上限
+    run(model_path, &prompt, translate_budget(text), 0.1, &mut |_| {})
 }
 
 /// 本地 GGUF 对话（F4），可带划词/截图上下文
@@ -305,6 +478,7 @@ pub fn chat(
     ctx_title: &str,
     ctx_source: &str,
     ctx_translated: &str,
+    on_token: &mut dyn FnMut(&str),
 ) -> Result<String, String> {
     let question = question.trim();
     if question.is_empty() {
@@ -327,6 +501,115 @@ pub fn chat(
         system.push_str("\n\n");
         system.push_str(&ctx_lines.join("\n"));
     }
-    let prompt = chatml(&system, question, false); // 对话允许思考（剥 think 后返回）
-    run(model_path, &prompt, 768, 0.3)
+    let prompt = chatml(&system, question, false); // 对话允许思考（ThinkFilter 会边流边剥）
+    // 对话的输出长度和提问长度没有关系（"解释一下 XX" 五个字能问出一大段），
+    // 所以这里不按输入估，给一个固定的、够写完一段完整回答的额度。
+    // 之前 768 偏紧，回答经常被切在半句上；有了流式，等待的体感代价也小了。
+    run(model_path, &prompt, 1536, 0.3, on_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把一串分片喂进去，返回一路吐出来的可见文本（模拟流式）
+    fn stream(pieces: &[&str]) -> String {
+        let mut f = ThinkFilter::new();
+        let mut out = String::new();
+        for p in pieces {
+            out.push_str(&f.push(p));
+        }
+        out.push_str(&f.flush());
+        out
+    }
+
+    #[test]
+    fn plain_text_passes_through_untouched() {
+        assert_eq!(stream(&["你好", "，世界"]), "你好，世界");
+    }
+
+    #[test]
+    fn think_block_is_removed() {
+        assert_eq!(stream(&["<think>盘算一下</think>答案是 42"]), "答案是 42");
+    }
+
+    /// 关键用例：<think> 这七个字完全可能被切在两个 token 里，
+    /// 拿到半截就判断会把标签漏出去给用户看见
+    #[test]
+    fn tag_split_across_chunks_is_still_caught() {
+        assert_eq!(stream(&["<thi", "nk>秘密", "</thi", "nk>正文"]), "正文");
+    }
+
+    #[test]
+    fn tag_split_one_char_at_a_time_is_still_caught() {
+        let pieces: Vec<&str> = vec!["<", "t", "h", "i", "n", "k", ">", "秘密", "</think>", "正文"];
+        assert_eq!(stream(&pieces), "正文");
+    }
+
+    /// 尖括号不是标签开头时不能被吞掉
+    #[test]
+    fn lone_angle_bracket_is_not_swallowed() {
+        assert_eq!(stream(&["a < b", " and c"]), "a < b and c");
+        assert_eq!(stream(&["<thinking>"]), "<thinking>");
+    }
+
+    /// 生成被 max_tokens 截断在思考中途：宁可什么都不显示，也不能把思考过程当译文吐出来
+    #[test]
+    fn unterminated_think_yields_nothing() {
+        assert_eq!(stream(&["<think>想到一半就没了"]), "");
+    }
+
+    /// 划词那种短句用最小额度就够，不必按长文的规格生成
+    #[test]
+    fn short_text_gets_the_floor_budget() {
+        assert_eq!(translate_budget("hello"), 256);
+    }
+
+    /// 关键用例：原文越长，允许生成的译文就得越长。
+    /// 以前写死 640，四百来字以上的原文译文必被截断且不报错。
+    #[test]
+    fn budget_grows_with_the_source_text() {
+        let one_page: String = "这是一段需要翻译的中文正文。".repeat(60); // 约 840 字
+        let budget = translate_budget(&one_page);
+        assert!(budget > 640, "长文预算 {budget} 应该超过旧的固定值 640");
+        assert!(budget >= estimate_tokens(&one_page), "预算至少要够把原文译完");
+    }
+
+    /// 但不能无限涨：纯 CPU 每秒十几个 token，4096 已经要等好几分钟
+    #[test]
+    fn budget_is_capped_so_users_are_not_left_waiting_forever() {
+        assert_eq!(translate_budget(&"字".repeat(100_000)), 4096);
+    }
+
+    /// 用户实际报的场景：整页正文要能一次译完，不能中途停住。
+    /// 一页约 800~1200 token，这里连上下文一起验一遍，确保不会撞上限。
+    #[test]
+    fn a_full_page_translates_end_to_end() {
+        let page: String = "这是正文里的一句话，用来凑出整页的长度。".repeat(60); // 约 1200 字
+        let budget = translate_budget(&page);
+        let src = estimate_tokens(&page);
+        assert!(budget >= src, "预算 {budget} 必须够把 {src} token 的原文译完");
+        assert!(plan_ctx(src + 120, budget, ctx_len()).is_ok(), "整页不该撞上下文上限");
+    }
+
+    /// 短句不该按天花板开上下文：KV cache 是满额预分配的，翻一个词也划走小半个 G
+    #[test]
+    fn short_prompt_gets_a_small_context() {
+        assert_eq!(plan_ctx(40, 640, 8192).unwrap(), MIN_CTX);
+    }
+
+    #[test]
+    fn long_prompt_grows_the_context_up_to_the_ceiling() {
+        assert_eq!(plan_ctx(3000, 640, 8192).unwrap(), 4096);
+        assert_eq!(plan_ctx(5000, 640, 8192).unwrap(), 8192);
+    }
+
+    /// 待生成的 max_tokens 必须算进预算，否则生成到一半 KV cache 满，
+    /// 用户看到的是 "Decode Error 1: NoKvCacheSlot" 这种看不懂的话
+    #[test]
+    fn budget_accounts_for_tokens_still_to_be_generated() {
+        // prompt 本身没超 4096，但加上要生成的 640 就超了 —— 必须提前拒绝
+        assert!(plan_ctx(3800, 640, 4096).is_err());
+        assert!(plan_ctx(3000, 640, 4096).is_ok());
+    }
 }

@@ -127,6 +127,10 @@
             <span id="models-dir-path"></span>
             <button class="btn small" id="models-open">打开默认文件夹</button>
           </div>
+          <div class="row-between">
+            <span class="hk-note" style="margin:0" id="unload-note">模型加载后会常驻内存，下次翻译才不用重新读盘。</span>
+            <button class="btn small" id="models-unload">释放内存</button>
+          </div>
           <div class="hk-note">两种方式任选：① 把模型放进上面的默认文件夹后点「刷新」；② 用上面的按钮直接从任意位置选择模型。点 ✎ 自定义名称和备注；点 🗑 从列表移除（只是不再显示，不会删除磁盘上的文件，可随时恢复）。</div>
         </div>
 
@@ -237,6 +241,22 @@
           <div class="hk-row" data-hk="f5"><span>显示 / 隐藏主窗口</span><button class="hk-btn" data-hk="f5"></button></div>
           <div class="hk-note">点击右侧按钮后按下想要的组合键（如 Ctrl+Shift+A）。功能键 F1–F12 可单独使用，其他键需配合 Ctrl/Alt/Shift。按 Esc 取消录制，恢复默认点下方按钮。</div>
           <div class="row-end"><button class="btn small" id="hk-reset">恢复默认</button></div>
+        </div>
+
+        <div class="sec-label">关于</div>
+        <div class="card col">
+          <div class="row-between">
+            <span>当前版本</span>
+            <span id="about-version">—</span>
+          </div>
+          <div class="hk-note" id="update-note">
+            FlashTrans 不会自动联网。只有点击下面的「检查更新」时才会请求一次版本号，
+            不发送任何个人信息、设备信息或翻译内容。
+          </div>
+          <div class="row-end">
+            <button class="btn small" id="open-releases">打开发布页</button>
+            <button class="btn small" id="check-update">检查更新</button>
+          </div>
         </div>
       </div>
     </aside>

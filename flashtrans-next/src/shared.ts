@@ -593,6 +593,70 @@ export function cancelStreamUi() {
   active = null;
 }
 
+/**
+ * 本地模型的流式翻译。后端发的是和在线 API 完全一样的 llm:delta / llm:done / llm:error，
+ * 所以这里能直接复用上面那套监听和 StreamHandlers —— 调用方不用区分本地还是在线。
+ *
+ * 注意 NLLB / Opus 没有逐 token 这回事，后端会一次性补一个 done；对调用方无差别，
+ * 只是看不到逐字效果。
+ */
+export async function localTranslateStream(
+  settings: Settings,
+  text: string,
+  h: StreamHandlers,
+  ocr = false,
+): Promise<number> {
+  bindOnce();
+  const id = reqCounter++;
+  active = { id, h };
+  const { source, target } = resolveLangPair(settings, text);
+  await invoke("local_translate_stream", {
+    reqId: id,
+    req: {
+      backend: settings.local.mode,
+      model: settings.local.selectedModel,
+      text,
+      sourceLang: source,
+      targetLang: target,
+      targetName: target !== "auto" ? langEnglish(target) : "",
+      ocr,
+      domainPrompt: activeDomainPrompt(settings),
+    },
+  });
+  return id;
+}
+
+/** 本地模型的流式对话（F4）。协议同 {@link localTranslateStream}。 */
+export async function localChatStream(
+  settings: Settings,
+  question: string,
+  contextTitle: string,
+  contextSource: string,
+  contextTranslated: string,
+  h: StreamHandlers,
+): Promise<number> {
+  bindOnce();
+  const id = reqCounter++;
+  active = { id, h };
+  await invoke("local_chat_stream", {
+    reqId: id,
+    req: {
+      backend: settings.local.mode,
+      model: assistantModel(settings) || settings.local.selectedModel,
+      question,
+      contextTitle,
+      contextSource,
+      contextTranslated,
+    },
+  });
+  return id;
+}
+
+/** 释放本地模型占用的内存（GGUF 权重缓存 + NLLB/Opus 的 bridge 子进程）。下次用会自动重载。 */
+export async function localUnload(): Promise<{ gguf: number; bridge: boolean }> {
+  return (await invoke("local_unload")) as { gguf: number; bridge: boolean };
+}
+
 export function translateMessages(text: string, targetLang: string, ocr = false, domain = "") {
   const langName = langEnglish(targetLang);
   let content =

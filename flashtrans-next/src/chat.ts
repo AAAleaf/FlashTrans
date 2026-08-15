@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   loadSettings, activeProfile, applyTheme, applyScale, onSettingsChanged,
-  llmStream, localChat, assistantModel, el, ICONS, mountWinControls, type Settings,
+  llmStream, localChatStream, assistantModel, el, ICONS, mountWinControls, type Settings,
 } from "./shared";
 
 const win = getCurrentWindow();
@@ -117,18 +117,26 @@ async function send() {
 
   // ── 本地 GGUF 大模型（单轮 + 引用上下文）──
   if (local) {
-    try {
-      const out = await localChat(settings, q, "", ctxSource, ctxTranslated);
-      bubble.textContent = out || "（无回复）";
-      history.push({ role: "assistant", content: out });
-    } catch (e) {
-      bubble.textContent = String(e);
-      bubble.classList.add("err");
-    }
-    streaming = false;
-    $<HTMLButtonElement>("btn-send").disabled = false;
-    scrollBottom();
-    $("input").focus();
+    await localChatStream(settings, q, "", ctxSource, ctxTranslated, {
+      onDelta: (t) => {
+        caret.insertAdjacentText("beforebegin", t);
+        scrollBottom();
+      },
+      onDone: (full) => {
+        bubble.textContent = full || "（无回复）";
+        history.push({ role: "assistant", content: full });
+        streaming = false;
+        $<HTMLButtonElement>("btn-send").disabled = false;
+        scrollBottom();
+        $("input").focus();
+      },
+      onError: (m) => {
+        bubble.textContent = m;
+        bubble.classList.add("err");
+        streaming = false;
+        $<HTMLButtonElement>("btn-send").disabled = false;
+      },
+    });
     return;
   }
 

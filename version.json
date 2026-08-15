@@ -1,0 +1,5 @@
+{
+  "version": "2.4.0",
+  "notes": "本地模型支持逐字显示，新增释放内存按钮，修复长文本翻译错乱",
+  "url": "https://github.com/chai1220/FlashTrans/releases"
+}
