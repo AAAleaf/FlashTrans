@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
@@ -1175,6 +1175,76 @@ struct LlmRequest {
     temperature: Option<f64>,
 }
 
+/// 进程级共享的 HTTP client：TLS/连接池只建一次，跨请求复用 keep-alive 连接。
+/// 之前每个请求 `Client::new()` 一次，首次请求永远要付一次冷 DNS+TCP+TLS 的代价。
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(4)
+            .user_agent("FlashTrans")
+            .build()
+            .expect("build reqwest client")
+    })
+}
+
+/// 启动预热：对当前在用的在线 API 打一个最省的请求，把 TCP/TLS 连接和远端模型
+/// 的推理槽热起来，让用户第一次按 F1/F2 划词翻译时不用等冷连接 + 冷 prefill。
+/// 失败静默忽略——预热只是优化，不能因为网络差就让启动报错或卡住。
+fn warmup_online_api(app: &AppHandle) {
+    let s = read_settings_value(app);
+    let empty = json!({});
+    let local = s.get("local").unwrap_or(&empty);
+    if local.get("mode").and_then(Value::as_str).unwrap_or("") == "api" {
+        let api = s.get("api").unwrap_or(&empty);
+        let profiles = api.get("profiles").and_then(Value::as_array).cloned().unwrap_or_default();
+        let sel = api.get("selected").and_then(Value::as_str).unwrap_or("");
+        let p = profiles
+            .iter()
+            .find(|x| x.get("name").and_then(Value::as_str) == Some(sel))
+            .or_else(|| profiles.first())
+            .cloned()
+            .unwrap_or_default();
+        let base = p.get("baseUrl").and_then(Value::as_str).unwrap_or("").trim().trim_end_matches('/').to_string();
+        let model = p.get("model").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let key = p.get("apiKey").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if !base.is_empty() && !model.is_empty() && !key.is_empty() {
+            let client = http_client();
+            let app2 = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let url = if base.ends_with("/chat/completions") {
+                    base.clone()
+                } else {
+                    format!("{base}/chat/completions")
+                };
+                let body = json!({
+                    "model": model,
+                    "messages": [{ "role": "user", "content": "ping" }],
+                    "stream": false,
+                    "max_tokens": 1,
+                });
+                let resp = client
+                    .post(&url)
+                    .bearer_auth(&key)
+                    .json(&body)
+                    .timeout(Duration::from_secs(20))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        eprintln!("warmup api ok: {base} {model}");
+                        let _ = app2.emit_to("popup", "llm:prewarmed", json!({}));
+                    }
+                    Ok(r) => eprintln!("warmup api http {}: {base} {model}", r.status().as_u16()),
+                    Err(e) => eprintln!("warmup api err: {base} {model} — {e}"),
+                }
+            });
+        }
+    }
+}
+
 #[tauri::command]
 async fn llm_stream(window: tauri::WebviewWindow, req_id: u64, req: LlmRequest) -> Result<(), String> {
     let base = req.base_url.trim().trim_end_matches('/').to_string();
@@ -1198,7 +1268,7 @@ async fn llm_stream(window: tauri::WebviewWindow, req_id: u64, req: LlmRequest) 
         "enable_thinking": false,
     });
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(&url)
         .bearer_auth(req.api_key.trim())
@@ -2458,7 +2528,7 @@ fn app_version(app: AppHandle) -> String {
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
-    let resp = reqwest::Client::new()
+    let resp = http_client()
         .get(UPDATE_MANIFEST)
         .header("User-Agent", "FlashTrans")
         .timeout(Duration::from_secs(15))
@@ -2750,6 +2820,16 @@ pub fn run() {
         ])
         .setup(|app| {
             apply_hotkeys(app.handle());
+
+            // 启动即预热在线 API：提前把连接 + 远端模型推理槽热起来，
+            // 避免用户第一次划词翻译时等冷连接 / 冷 prefill（首字慢）。
+            // 本地引擎模式或未配置 API 时内部自动跳过；静默启动也做，
+            // 因为托盘常驻正是划词翻译的主要入口。
+            if std::env::var("FLASHTRANS_NO_WARMUP").map(|v| v == "1").unwrap_or(false) {
+                eprintln!("warmup disabled via FLASHTRANS_NO_WARMUP");
+            } else {
+                warmup_online_api(app.handle());
+            }
 
             // 主窗口在配置里是 visible:false（避免开机自启时闪一下），
             // 非静默启动时在这里显示出来
