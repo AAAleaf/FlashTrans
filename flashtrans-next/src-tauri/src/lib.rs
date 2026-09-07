@@ -1193,6 +1193,9 @@ async fn llm_stream(window: tauri::WebviewWindow, req_id: u64, req: LlmRequest) 
         "messages": req.messages,
         "stream": true,
         "temperature": req.temperature.unwrap_or(0.2),
+        // 在线 API 统一关闭思考/reasoning：DeepSeek 等兼容接口用该参数，
+        // 若后端不支持会忽略，不影响请求。避免先出思考内容拖慢翻译/对话。
+        "enable_thinking": false,
     });
 
     let client = reqwest::Client::new();
@@ -1244,10 +1247,13 @@ async fn llm_stream(window: tauri::WebviewWindow, req_id: u64, req: LlmRequest) 
                 return Ok(());
             }
             if let Ok(v) = serde_json::from_str::<Value>(payload) {
-                if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                    if !delta.is_empty() {
-                        full.push_str(delta);
-                        let _ = window.emit("llm:delta", json!({ "id": req_id, "text": delta }));
+                let delta = &v["choices"][0]["delta"];
+                // 优先取正文 content；若本轮只有 reasoning_content（思考过程），
+                // 一律丢弃，不把它当译文吐给前端，避免拖慢显示又产出垃圾。
+                if let Some(text) = delta["content"].as_str() {
+                    if !text.is_empty() {
+                        full.push_str(text);
+                        let _ = window.emit("llm:delta", json!({ "id": req_id, "text": text }));
                     }
                 }
             }
