@@ -1,0 +1,45 @@
+name: Build FlashTrans
+
+on:
+  # 手动触发：仓库 → Actions → Build FlashTrans → Run workflow
+  workflow_dispatch:
+  # 打 tag 时自动触发（如 v2.4.0），配合 release 上传
+  push:
+    tags:
+      - "v*"
+  # 可选：推到 main 也构建（若要，打开下面注释）
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 官方 tauri-action 自动完成：npm ci → beforeBuildCommand(npm run build)
+      # → cargo build/release，并内置 cargo/npm 缓存与 sccache
+      - name: Build (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # 打 tag 推送时自动创建 GitHub Release 并上传安装包；
+          # 手动 workflow_dispatch 时不创建 Release（仅产 artifact）
+          tagName: ${{ github.ref_name }}
+
+      # 保存安装包 / 可执行文件，便于从工作流页面下载
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashtrans-windows
+          if-no-files-found: ignore
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/release/FlashTrans.exe
