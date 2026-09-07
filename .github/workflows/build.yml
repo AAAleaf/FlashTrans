@@ -7,11 +7,6 @@ on:
   push:
     tags:
       - "v*"
-  # 可选：推到 main 也构建（若要，打开下面注释）
-  # push:
-  #   branches: [main]
-  # pull_request:
-  #   branches: [main]
 
 concurrency:
   group: build-${{ github.ref }}
@@ -23,34 +18,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 前端构建依赖（typescript/vite）在 devDependencies，tauri-action 的 npm ci
-      # 默认不装 dev 依赖，这里先手动装全，确保 tsc/vite 存在
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: package-lock.json
+          # package-lock.json 在 flashtrans-next/ 子目录，不在仓库根目录
+          cache-dependency-path: flashtrans-next/package-lock.json
+
+      - name: Setup Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: flashtrans-next/src-tauri
 
       - name: Install frontend dependencies
-        run: npm install
+        working-directory: flashtrans-next
+        run: npm ci
 
-      # 官方 tauri-action 完成：beforeBuildCommand(npm run build) → cargo build/release，
-      # 并内置 cargo 缓存与 sccache
+      # llama-cpp-2 的 build.rs 需要 libclang 与 CMake（runner 自带 cmake，libclang 保险起见显式装）
+      - name: Install LLVM (libclang)
+        run: choco install llvm --no-progress -y
+
       - name: Build (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # 项目在仓库的 flashtrans-next 子目录
+          projectPath: flashtrans-next
           # 手动 workflow_dispatch 时不创建 Release（仅产 artifact）
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('FlashTrans {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
 
-      # 保存安装包 / 可执行文件，便于从工作流页面下载
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: flashtrans-windows
-          if-no-files-found: ignore
+          if-no-files-found: error
           path: |
-            src-tauri/target/release/bundle/**
-            src-tauri/target/release/FlashTrans.exe
+            flashtrans-next/src-tauri/target/release/bundle/**/*.exe
+            flashtrans-next/src-tauri/target/release/FlashTrans.exe
