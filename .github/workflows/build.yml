@@ -23,14 +23,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 官方 tauri-action 自动完成：npm ci → beforeBuildCommand(npm run build)
-      # → cargo build/release，并内置 cargo/npm 缓存与 sccache
+      # 前端构建依赖（typescript/vite）在 devDependencies，tauri-action 的 npm ci
+      # 默认不装 dev 依赖，这里先手动装全，确保 tsc/vite 存在
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      # 官方 tauri-action 完成：beforeBuildCommand(npm run build) → cargo build/release，
+      # 并内置 cargo 缓存与 sccache
       - name: Build (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # 打 tag 推送时自动创建 GitHub Release 并上传安装包；
           # 手动 workflow_dispatch 时不创建 Release（仅产 artifact）
           tagName: ${{ github.ref_name }}
 
