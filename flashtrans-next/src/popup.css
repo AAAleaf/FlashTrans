@@ -12,6 +12,30 @@ body { background: var(--tint); overflow: hidden; }
 }
 .head .x:hover { background: var(--fill); color: var(--text); }
 
+/* 钉在桌面按钮 */
+.head .pin {
+  margin: 0 8px 0 0; border: 0; background: transparent; color: var(--text-3);
+  cursor: pointer; width: 22px; height: 22px; border-radius: 50%; display: grid;
+  place-items: center; font-size: 12px; transition: all 0.15s;
+}
+.head .pin:hover { background: var(--fill); color: var(--text); }
+.head .pin.on { color: var(--accent); }
+
+/* 拖拽拉升手柄 (透明边框，悬停时显示轻量感) */
+.edge, .corner { position: absolute; box-sizing: border-box; pointer-events: auto; }
+.edge { height: 8px; left: 0; right: 0; }
+.edge.top    { top: 30px; cursor: ns-row-resize; }
+.edge.bottom { bottom: 0; cursor: ns-row-resize; }
+.edge.left   { top: 38px; bottom: 8px; width: 8px; cursor: ew-row-resize; }
+.edge.right  { top: 38px; bottom: 8px; width: 8px; right: 0; cursor: ew-row-resize; }
+.corner { width: 12px; height: 12px; border: 1px solid transparent; border-radius: 50%; }
+.corner:hover { border-color: var(--accent); }
+.corner.top-left     { top: 28px; left: 0;    cursor: nwse-resize; }
+.corner.top-right    { top: 28px; right: 0;   cursor: nesw-resize; }
+.corner.bottom-left  { bottom: 0; left: 0;   cursor: swne-resize; }
+.corner.bottom-right { bottom: 0; right: 0;  cursor: se-resize; }
+#pop:hover .edge, #pop:hover .corner { border: 1px solid var(--hairline); }
+
 .src-line {
   font-size: 12.5px; color: var(--text-2); line-height: 1.55; max-height: 78px; overflow-y: auto;
   user-select: text; -webkit-user-select: text; white-space: pre-wrap;

@@ -118,7 +118,7 @@ function startCountdown() {
     fg.style.strokeDashoffset = String(RING_C * (1 - Math.max(0, remainMs) / total));
     if (remainMs <= 0) {
       stopCountdown();
-      win.hide();
+      if (shouldAutoHide()) win.hide();
     }
   }, 100);
 }
@@ -126,6 +126,61 @@ function startCountdown() {
 document.addEventListener("mouseenter", () => (hovering = true));
 document.addEventListener("mouseleave", () => (hovering = false));
 document.addEventListener("mousemove", () => (hovering = true));
+
+/* ───────── 钉在桌面 ───────── */
+// 钉住后弹窗常驻桌面：不再自动倒计时关闭，也不在失焦时隐藏，始终置顶。
+let pinned = false;
+function shouldAutoHide() {
+  return !pinned;
+}
+function setPin(on: boolean) {
+  pinned = on;
+  const b = $("btn-pin");
+  if (b) b.classList.toggle("on", on);
+  if (on) {
+    // 释放当前的任何关闭倒计时 / 失焦定时，保持停留
+    stopCountdown();
+    window.clearTimeout(blurHideTimer);
+  }
+}
+
+/* ───────── 窗口拖拽拉升 ───────── */
+// 边框为 transparent + decorations:false，Tauri 不绘制缩放手柄，故在 HTML 里
+// 加 4 条边 + 4 个角的拖动热区。拖动时把新尺寸交给 popup_resize（Rust 端会
+// 把窗口挪到屏幕内，所以向上/向左拉大也能正常显示，不会飞出去）。
+const MIN_W = 320, MAX_W = 640, MIN_H = 120, MAX_H = 560;
+let drag: { handle: string; w0: number; h0: number; x0: number; y0: number } | null = null;
+async function beginResize(handle: string, e: PointerEvent) {
+  const size = await win.getSize();
+  const w0 = size.width, h0 = size.height;
+  drag = { handle, w0, h0, x0: e.clientX, y0: e.clientY };
+  (e.target as HTMLElement).setPointerCapture(e.pointerId);
+}
+function onPointerMove(e: PointerEvent) {
+  if (!drag) return;
+  const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+  let { w0, h0, handle } = drag;
+  let w = w0, h = h0;
+  const vert = handle.includes("top") || handle.includes("bottom");
+  const horz = handle.includes("left") || handle.includes("right");
+  if (horz) {
+    if (handle.includes("right")) w = w0 + dx;
+    if (handle.includes("left")) w = w0 - dx;
+  }
+  if (vert) {
+    if (handle.includes("bottom")) h = h0 + dy;
+    if (handle.includes("top")) h = h0 - dy;
+  }
+  w = Math.min(MAX_W, Math.max(MIN_W, w));
+  h = Math.min(MAX_H, Math.max(MIN_H, h));
+  invoke("popup_resize", { width: w, height: h }).catch(() => {});
+}
+function endResize(_e: PointerEvent) {
+  if (!drag) return;
+  drag = null;
+  // 松手后沿用内容自适应，避免手工裹掉内容
+  requestAnimationFrame(() => fitHeight(true));
+}
 
 /* ───────── F1 划词 ───────── */
 
@@ -452,7 +507,7 @@ async function main() {
       window.clearTimeout(blurHideTimer);
       return;
     }
-    if (!settings?.closeOnBlur || !resultShown) return;
+    if (!settings?.closeOnBlur || !resultShown || !shouldAutoHide()) return;
     // 稍作防抖：避免重新触发 F1 时 set_focusable(false) 引起的瞬时失焦误关
     window.clearTimeout(blurHideTimer);
     blurHideTimer = window.setTimeout(() => {
@@ -493,6 +548,19 @@ async function main() {
   $("btn-close").addEventListener("click", () => {
     stopCountdown();
     win.hide();
+  });
+
+  // 钉在桌面：切换常驻（不自动关闭 / 不失焦隐藏）。点 × 仍可手动关闭。
+  $("btn-pin").addEventListener("click", () => setPin(!pinned));
+
+  // 绑定 8 个缩放手柄
+  document.querySelectorAll("[data-handle]").forEach((el) => {
+    const h = (el as HTMLElement).dataset.handle;
+    if (!h) return;
+    el.addEventListener("pointerdown", (e) => beginResize(h, e as PointerEvent));
+    el.addEventListener("pointermove", onPointerMove as any);
+    el.addEventListener("pointerup", endResize as any);
+    el.addEventListener("pointercancel", endResize as any);
   });
 
   $("f1-copy").addEventListener("click", async () => {
