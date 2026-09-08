@@ -1,6 +1,8 @@
 /* ── 悬浮弹窗 ── */
-/* 去掉亚克力后改用不透明底色（半透明 tint 是为毛玻璃设计的，没毛玻璃会显得脏） */
-body { background: var(--sheen), var(--tint-solid); overflow: hidden; }
+/* 窗口已关掉 OS 级透明（tauri.conf.json transparent:false），这里用纯色平涂，
+   不用渐变 sheen、不用半透明 tint —— 目标是全不透明、零 DWM 模糊合成开销 */
+html { background: var(--tint-solid); }
+body { background: var(--tint-solid); overflow: hidden; }
 
 /* 填满窗口 + 纵向 flex：拉大窗口时按钮组始终钉在底部，文字随宽度回流 */
 html, body { height: 100%; }
@@ -16,16 +18,16 @@ html, body { height: 100%; }
   overflow: hidden;
   animation: rise-in 0.32s var(--spring) both;
 }
-/* 手动定过尺寸后：#pop 锁死为窗口高度，超出即裁剪，按钮组钉底 */
+/* 手动定过尺寸后：#pop 锁死为窗口高度，超出即裁剪 */
 body.manual #pop { height: 100%; min-height: 100%; }
 #view-f1, #view-f2, #view-status { min-height: 0; min-width: 0; }
 #view-f1 { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-#view-f1 .foot { margin-top: auto; }
-/* 手动定过尺寸后：原文/译文高度由窗口分配，放不下出滚动条、放得下无滚动条 */
-body.manual .src-line,
-body.manual .dst-line { max-height: none; min-height: 0; overflow-y: auto; }
-body.manual .src-line { flex: 0 1 auto; }
-body.manual .dst-line { flex: 1 1 auto; }
+/* 只要译文：隐藏原文行、分隔线、「复制原文」按钮。
+   TS 里仍会切 display:""，用 !important 保证始终隐藏；元素保留避免空引用 */
+#f1-src, #view-f1 .divider, #f1-copysrc { display: none !important; }
+/* 手动定过尺寸后：译文随窗口宽度回流，窗口不够时译文区收缩出滚动条，
+   按钮组紧跟可见内容下方 —— 内容没显示完时中间绝不留空白 */
+body.manual .dst-line { min-height: 0; overflow-y: auto; flex: 0 1 auto; }
 
 .head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
 .head .tag { font-size: 11px; font-weight: 600; letter-spacing: 1.2px; color: var(--text-2); }
@@ -64,13 +66,13 @@ body.manual .dst-line { flex: 1 1 auto; }
 #pop:hover .edge, #pop:hover .corner { border: 1px solid var(--hairline); }
 
 .src-line {
-  font-size: 12.5px; color: var(--text-2); line-height: 1.55; max-height: 78px; overflow-y: auto;
+  font-size: 12.5px; color: var(--text-2); line-height: 1.55;
   user-select: text; -webkit-user-select: text; white-space: pre-wrap;
   overflow-wrap: anywhere; word-break: break-word;
 }
 .divider { height: 1px; background: var(--hairline); margin: 10px 0; }
 .dst-line {
-  font-size: 14.5px; line-height: 1.62; font-weight: 450; max-height: 190px; overflow-y: auto;
+  font-size: 14.5px; line-height: 1.62; font-weight: 450;
   user-select: text; -webkit-user-select: text; white-space: pre-wrap;
   overflow-wrap: anywhere; word-break: break-word;
 }

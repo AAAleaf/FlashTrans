@@ -77,9 +77,10 @@ function fitHeight(force = true) {
     fitPending = false;
     fitForce = false;
     // scrollHeight 是未缩放的 CSS 像素，实际显示尺寸是它乘以界面缩放倍率；
-    // 不乘的话开了「大 / 特大」缩放后弹窗会被裁掉一截
+    // 不乘的话开了「大 / 特大」缩放后弹窗会被裁掉一截。
+    // 高度上限放宽到 900：长译文窗口直接长到装下全部内容，不留内部滚动
     const z = currentScale();
-    const h = Math.min(560, Math.max(96, document.getElementById("pop")!.scrollHeight + 4));
+    const h = Math.min(900, Math.max(96, document.getElementById("pop")!.scrollHeight + 4));
     if (!forced && Math.abs(h - lastFitH) < 6) return;
     lastFitH = h;
     invoke("popup_resize", { width: POPUP_W * z, height: h * z }).catch(() => {});
