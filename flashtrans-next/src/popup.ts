@@ -151,8 +151,9 @@ function setPin(on: boolean) {
 const MIN_W = 320, MAX_W = 640, MIN_H = 120, MAX_H = 560;
 let drag: { handle: string; w0: number; h0: number; x0: number; y0: number } | null = null;
 async function beginResize(handle: string, e: PointerEvent) {
-  const size = await win.getSize();
-  const w0 = size.width, h0 = size.height;
+  const size = await win.innerSize();
+  const z = currentScale();
+  const w0 = size.width / z, h0 = size.height / z;
   drag = { handle, w0, h0, x0: e.clientX, y0: e.clientY };
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
 }
