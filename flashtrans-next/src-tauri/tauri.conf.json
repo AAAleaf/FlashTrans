@@ -40,7 +40,7 @@
         "transparent": true,
         "shadow": true,
         "visible": false,
-        "resizable": false,
+        "resizable": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "windowEffects": {
