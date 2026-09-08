@@ -11,8 +11,20 @@
     <div id="pop">
       <div class="head" data-tauri-drag-region>
         <span class="tag" id="tag" data-tauri-drag-region>划词翻译</span>
+        <button class="pin" id="btn-pin" title="钉在桌面">📌</button>
         <button class="x" id="btn-close" title="关闭">✕</button>
       </div>
+
+      <!-- 窗口四边 + 四角拖拽拉升手柄 -->
+      <div class="edge top" data-handle="top"></div>
+      <div class="edge bottom" data-handle="bottom"></div>
+      <div class="edge left" data-handle="left"></div>
+      <div class="edge right" data-handle="right"></div>
+      <div class="corner" data-handle="top-left"></div>
+      <div class="corner" data-handle="top-right"></div>
+      <div class="corner" data-handle="bottom-left"></div>
+      <div class="corner" data-handle="bottom-right"></div>
+
 
       <!-- F1 模式 -->
       <div id="view-f1" style="display:none">
