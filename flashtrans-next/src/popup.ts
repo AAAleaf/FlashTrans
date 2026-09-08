@@ -141,6 +141,9 @@ function setPin(on: boolean) {
     // 释放当前的任何关闭倒计时 / 失焦定时，保持停留
     stopCountdown();
     window.clearTimeout(blurHideTimer);
+  } else {
+    // 取消钉住后恢复自动关闭
+    startCountdown();
   }
 }
 

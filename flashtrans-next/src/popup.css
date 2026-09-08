@@ -37,12 +37,12 @@ body { background: var(--tint); overflow: hidden; }
 #pop:hover .edge, #pop:hover .corner { border: 1px solid var(--hairline); }
 
 .src-line {
-  font-size: 12.5px; color: var(--text-2); line-height: 1.55; max-height: 78px; overflow-y: auto;
+  font-size: 12.5px; color: var(--text-2); line-height: 1.55; max-height: 78px; overflow: hidden;
   user-select: text; -webkit-user-select: text; white-space: pre-wrap;
 }
 .divider { height: 1px; background: var(--hairline); margin: 10px 0; }
 .dst-line {
-  font-size: 14.5px; line-height: 1.62; font-weight: 450; max-height: 190px; overflow-y: auto;
+  font-size: 14.5px; line-height: 1.62; font-weight: 450; max-height: 190px; overflow: hidden;
   user-select: text; -webkit-user-select: text; white-space: pre-wrap;
 }
 .dst-line.err { color: var(--danger); font-size: 13px; }
