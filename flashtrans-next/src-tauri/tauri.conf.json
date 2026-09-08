@@ -42,10 +42,7 @@
         "visible": false,
         "resizable": true,
         "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "windowEffects": {
-          "effects": ["acrylic"]
-        }
+        "skipTaskbar": true
       },
       {
         "label": "snip",
