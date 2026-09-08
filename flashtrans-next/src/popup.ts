@@ -68,6 +68,7 @@ let lastFitH = 0;
 
 /** force=false 只给流式输出用：中途高度差几像素无所谓，落定时会有一次强制校准 */
 function fitHeight(force = true) {
+  if (manualSize) return; // 用户手动定过尺寸：内容回流+裁剪，不再动窗口
   fitForce = fitForce || force;
   if (fitPending) return;
   fitPending = true;
@@ -152,18 +153,18 @@ function setPin(on: boolean) {
 // 加 4 条边 + 4 个角的拖动热区。拖动时把新尺寸交给 popup_resize（Rust 端会
 // 把窗口挪到屏幕内，所以向上/向左拉大也能正常显示，不会飞出去）。
 const MIN_W = 320, MAX_W = 640, MIN_H = 120, MAX_H = 560;
-let drag: { handle: string; w0: number; h0: number; x0: number; y0: number } | null = null;
+let manualSize = false; // 手动拉过后窗口尺寸交给用户
+let drag: { handle: string; w0: number; h0: number; x0: number; y0: number; z: number } | null = null;
 async function beginResize(handle: string, e: PointerEvent) {
-  const size = await win.innerSize();
-  const z = currentScale();
-  const w0 = size.width / z, h0 = size.height / z;
-  drag = { handle, w0, h0, x0: e.clientX, y0: e.clientY };
+  const [size, f] = await Promise.all([win.innerSize(), win.scaleFactor()]);
+  // 逻辑像素 = 物理像素 / DPI；指针是 CSS 像素，1 CSS px = z 逻辑 px（与 fitHeight 同一套换算）
+  drag = { handle, w0: size.width / f, h0: size.height / f, x0: e.clientX, y0: e.clientY, z: currentScale() };
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
 }
 function onPointerMove(e: PointerEvent) {
   if (!drag) return;
-  const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
-  let { w0, h0, handle } = drag;
+  const dx = (e.clientX - drag.x0) * drag.z, dy = (e.clientY - drag.y0) * drag.z;
+  const { w0, h0, handle } = drag;
   let w = w0, h = h0;
   const vert = handle.includes("top") || handle.includes("bottom");
   const horz = handle.includes("left") || handle.includes("right");
@@ -182,8 +183,11 @@ function onPointerMove(e: PointerEvent) {
 function endResize(_e: PointerEvent) {
   if (!drag) return;
   drag = null;
-  // 松手后沿用内容自适应，避免手工裹掉内容
-  requestAnimationFrame(() => fitHeight(true));
+  // 手动拉过后：尺寸归用户，文字自动换行、放不下裁掉，fitHeight 不再改窗口
+  if (!manualSize) {
+    manualSize = true;
+    document.body.classList.add("manual");
+  }
 }
 
 /* ───────── F1 划词 ───────── */
