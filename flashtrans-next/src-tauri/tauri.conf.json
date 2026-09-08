@@ -37,7 +37,7 @@
         "width": 440,
         "height": 260,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "shadow": true,
         "visible": false,
         "resizable": true,
